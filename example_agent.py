@@ -6,14 +6,13 @@ This is NOT a working agent — it's a wiring reference.
 Replace the placeholder calls with your actual framework's API.
 """
 
-from sdk.episodic_sdk import (
+from sdk import (
     episodic_trace,
     async_episodic_trace,
     JobPusher,
     new_episode_id,
     ReasoningExtractor,
 )
-
 # ----------------------------------------------------------------
 # Setup: one episode_id per agent run, generated at the start.
 # ----------------------------------------------------------------

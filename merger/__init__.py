@@ -1,0 +1,1 @@
+from merger.merger import run_merger
