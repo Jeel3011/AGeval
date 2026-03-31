@@ -18,14 +18,13 @@ import os
 import time
 import logging
 import signal
-import sys
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from supabase import create_client
 from merger.merger import run_merger
+from eval.rules import score_episode
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,22 +43,21 @@ def get_client():
         os.environ["SUPABASE_SERVICE_ROLE_KEY"],
     )
 
+
 def pick_job(client) -> dict | None:
     result = client.rpc("pick_next_job").execute()
 
-    # RPC now returns a single JSON object or null
     if result.data is None:
         return None
 
-    # result.data is already a dict
     if isinstance(result.data, dict):
         return result.data
 
-    # safety: if it came back as a list for any reason, take first element
     if isinstance(result.data, list) and len(result.data) > 0:
         return result.data[0]
 
     return None
+
 
 def requeue_job(client, job_id: str, current_retry: int, error: str | None = None):
     """Put a job back to pending after a transient failure."""
@@ -107,7 +105,6 @@ def process_job(client, job: dict):
         )
 
         if result == "not_ready":
-            # LangSmith trace not ready yet — requeue with delay
             log.info(f"Trace not ready for {run_id}, requeueing in {REQUEUE_DELAY}s")
             time.sleep(REQUEUE_DELAY)
             requeue_job(client, job_id, retry_count, error="trace_not_ready")
@@ -115,6 +112,18 @@ def process_job(client, job: dict):
 
         done_job(client, job_id)
         log.info(f"Job {job_id} done — episode {episode_id} merged successfully")
+
+        # score immediately after every successful merge
+        try:
+            score_result = score_episode(client, episode_id)
+            log.info(
+                f"Scored {episode_id} | "
+                f"score={score_result['score']} | "
+                f"breakdown={score_result['breakdown']}"
+            )
+        except Exception as score_exc:
+            # scoring failure never kills the worker or the job
+            log.error(f"Scoring failed for {episode_id}: {score_exc}")
 
     except Exception as exc:
         log.error(f"Job {job_id} failed: {exc}", exc_info=True)
