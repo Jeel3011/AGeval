@@ -13,7 +13,8 @@ Zero changes to your agent code.
 pip install ageval
 
 # or directly from GitHub
-pip install git+https://github.com/YOUR_USERNAME/agent-eval.git#subdirectory=ageval_package
+pip install git+https://github.com/Jeel3011/AGeval.git#subdirectory=ageval_package
+
 ```
 
 ---
