@@ -472,3 +472,94 @@ def _safe_serialize(value: Any) -> Any:
 def new_episode_id() -> str:
     """Generate a fresh episode ID. Use this at the start of each agent run."""
     return f"ep_{uuid.uuid4().hex[:16]}"
+
+class EpisodeSession:
+    """
+    Manages one agent run. Tracks step index automatically.
+    Use as a context manager or call .finish() manually.
+
+    Example:
+        with EpisodeSession(agent_id="my_agent", task="do X") as session:
+            result = session.trace(search_web, reasoning="searching for X")("query")
+            result = session.trace(parse_result)( result )
+        # job is pushed automatically on __exit__
+    """
+
+    def __init__(
+        self,
+        agent_id            : str,
+        task                : str | None = None,
+        swallow_write_errors: bool = True,
+    ):
+        self.episode_id          = new_episode_id()
+        self.agent_id            = agent_id
+        self.task                = task
+        self.swallow_write_errors= swallow_write_errors
+        self._step_index         = 0
+        self._client             = None
+        self._langsmith_run_id   = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = _get_supabase()
+        return self._client
+
+    def start(self, langsmith_run_id: str | None = None):
+        """
+        Call this at the start of the agent run.
+        Creates the stub episodes row so step writes don't fail the FK.
+        """
+        self._langsmith_run_id = langsmith_run_id or "pending"
+        self.client.table("episodes").insert({
+            "episode_id": self.episode_id,
+            "agent_id"  : self.agent_id,
+            "run_id"    : self._langsmith_run_id,
+            "task"      : self.task,
+        }).execute()
+        return self
+
+    def set_run_id(self, run_id: str):
+        """Update the run_id once you have it from LangSmith."""
+        self._langsmith_run_id = run_id
+        self.client.table("episodes").update(
+            {"run_id": run_id}
+        ).eq("episode_id", self.episode_id).execute()
+
+    def trace(self, fn: Callable, reasoning: str | None = None) -> Callable:
+        """
+        Wrap a tool function for this step. Auto-increments step_index.
+        Call the returned function immediately with the tool's arguments.
+
+        session.trace(search_web, reasoning="need to find X")("my query")
+        """
+        wrapped = episodic_trace(
+            episode_id          = self.episode_id,
+            step_index          = self._step_index,
+            llm_output          = reasoning,
+            swallow_write_errors= self.swallow_write_errors,
+        )(fn)
+        self._step_index += 1
+        return wrapped
+
+    def finish(self):
+        """Push the job to the queue. Worker picks it up and merges."""
+        if not self._langsmith_run_id or self._langsmith_run_id == "pending":
+            raise RuntimeError(
+                "run_id not set. Call session.set_run_id(run_id) "
+                "before finishing."
+            )
+        return JobPusher().push(
+            episode_id = self.episode_id,
+            run_id     = self._langsmith_run_id,
+            agent_id   = self.agent_id,
+            task       = self.task,
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._langsmith_run_id and self._langsmith_run_id != "pending":
+            self.finish()
+        return False  # don't suppress exceptions    
