@@ -10,3 +10,19 @@ wheels/
 .venv
 env
 .env
+
+# pytest
+.pytest_cache/
+
+# Local dev / scratch scripts (not part of the published framework)
+e2e_test.py
+example_agent.py
+brainstorming.md
+
+# Old integration test scripts (hardcoded IDs, need live Supabase)
+# The proper mocked unit tests live in tests/ and ARE tracked.
+sdk/test_sdk.py
+sdk/produce_trace.py
+sdk/produce_realistic_trace.py
+merger/test_merger.py
+eval/test_rules.py

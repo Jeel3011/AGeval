@@ -12,6 +12,12 @@ via a raw SQL call. Simpler to debug, no extra infra dependency.
 
 To run multiple workers in parallel just launch multiple processes —
 SKIP LOCKED guarantees they never grab the same job.
+
+Env vars required:
+    AGEVAL_SUPABASE_URL
+    AGEVAL_SUPABASE_SERVICE_KEY
+    LANGSMITH_API_KEY
+    OPENAI_API_KEY              (optional — for embedding generation)
 """
 
 import os
@@ -39,8 +45,8 @@ REQUEUE_DELAY  = 30   # seconds to wait before requeueing a not-ready trace
 
 def get_client():
     return create_client(
-        os.environ["SUPABASE_URL"],
-        os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+        os.environ["AGEVAL_SUPABASE_URL"],
+        os.environ["AGEVAL_SUPABASE_SERVICE_KEY"],
     )
 
 
@@ -105,8 +111,10 @@ def process_job(client, job: dict):
         )
 
         if result == "not_ready":
-            log.info(f"Trace not ready for {run_id}, requeueing in {REQUEUE_DELAY}s")
-            time.sleep(REQUEUE_DELAY)
+            # Exponential backoff: 30s, 60s, 120s, ...
+            backoff = REQUEUE_DELAY * (2 ** retry_count)
+            log.info(f"Trace not ready for {run_id}, requeueing in {backoff}s (attempt {retry_count + 1})")
+            time.sleep(backoff)
             requeue_job(client, job_id, retry_count, error="trace_not_ready")
             return
 

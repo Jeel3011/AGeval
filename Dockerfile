@@ -3,4 +3,5 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
+# main.py lives at the project root, not under api/
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

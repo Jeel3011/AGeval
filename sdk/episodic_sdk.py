@@ -1,16 +1,17 @@
 """
-episodic_sdk.py  (updated)
+episodic_sdk.py
 
-The only change from before: StepWriter and JobPusher now POST to
-your ingestion API instead of calling Supabase directly.
-
+The core SDK. StepWriter and JobPusher POST to the ingestion API.
 Users only need ONE env var:
     AGEVAL_API_KEY=ageval-sk-xxxxxxxx
 
-That's it. No Supabase URL, no service key, no LangSmith key.
+Everything else is automatic.
 
-Everything else (ErrorClassifier, ReasoningExtractor, episodic_trace,
-async_episodic_trace, EpisodeSession) is unchanged.
+Changes from v1:
+  - Thread-safe step_index via threading.Lock (safe for parallel tool calls)
+  - async_episodic_trace uses asyncio.to_thread — no event-loop blocking
+  - BatchStepWriter collects steps and flushes in a single HTTP POST
+  - EpisodeSession supports batched and non-batched modes
 """
 
 from __future__ import annotations
@@ -18,16 +19,18 @@ from __future__ import annotations
 import re
 import time
 import uuid
+import asyncio
 import functools
+import threading
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Optional
 
 
 # ---------------------------------------------------------------------------
-# API client — replaces Supabase client
+# API client
 # ---------------------------------------------------------------------------
-_API_BASE = "https://ageval-production.up.railway.app"  # set AGEVAL_API_URL to override
+_API_BASE = "https://ageval-production.up.railway.app"
 
 
 def _get_api_base() -> str:
@@ -45,15 +48,15 @@ def _get_api_key() -> str:
 
 def _post(path: str, payload: dict) -> dict:
     """POST to the ingestion API. Raises on HTTP error."""
-    import urllib.request, json, os
+    import urllib.request, json
 
-    url = f"{_get_api_base()}{path}"
+    url  = f"{_get_api_base()}{path}"
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
+    req  = urllib.request.Request(
         url,
         data=data,
         headers={
-            "Content-Type": "application/json",
+            "Content-Type" : "application/json",
             "Authorization": f"Bearer {_get_api_key()}",
         },
         method="POST",
@@ -66,8 +69,31 @@ def _post(path: str, payload: dict) -> dict:
         raise RuntimeError(f"ageval API error {e.code}: {body}") from e
 
 
+def _post_batch(path: str, payload: list[dict]) -> dict:
+    """POST a list of records to a batch endpoint."""
+    import urllib.request, json
+
+    url  = f"{_get_api_base()}{path}"
+    data = json.dumps(payload).encode()
+    req  = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type" : "application/json",
+            "Authorization": f"Bearer {_get_api_key()}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        raise RuntimeError(f"ageval API batch error {e.code}: {body}") from e
+
+
 # ---------------------------------------------------------------------------
-# 1. Error classification  (unchanged)
+# 1. Error classification
 # ---------------------------------------------------------------------------
 class ErrorCategory(str, Enum):
     AGENT_ERROR = "agent_error"
@@ -115,10 +141,10 @@ class ErrorClassifier:
 
 
 # ---------------------------------------------------------------------------
-# 2. Reasoning extractor  (unchanged)
+# 2. Reasoning extractor
 # ---------------------------------------------------------------------------
 class ReasoningExtractor:
-    _TAG_RE = re.compile(r"<reasoning[^>]*>(.*?)</reasoning>", re.DOTALL | re.IGNORECASE)
+    _TAG_RE  = re.compile(r"<reasoning[^>]*>(.*?)</reasoning>", re.DOTALL | re.IGNORECASE)
     _REACT_RE = re.compile(
         r"^(?:thought|reasoning|think)[:\s]+(.+?)(?=\n(?:action|tool|observation)|$)",
         re.DOTALL | re.IGNORECASE | re.MULTILINE,
@@ -138,7 +164,7 @@ class ReasoningExtractor:
 
 
 # ---------------------------------------------------------------------------
-# 3. StepWriter — now POSTs to API
+# 3. StepWriter (single write)
 # ---------------------------------------------------------------------------
 class StepWriter:
     def write(self, record: dict) -> None:
@@ -146,21 +172,91 @@ class StepWriter:
 
 
 # ---------------------------------------------------------------------------
-# 4. @episodic_trace  (unchanged internals, uses new StepWriter)
+# 4. BatchStepWriter — collects steps, flushes all at once
+# ---------------------------------------------------------------------------
+class BatchStepWriter:
+    """
+    Accumulates step records in memory and flushes them in a single
+    POST /steps/batch call. Designed for EpisodeSession usage where
+    all steps are flushed at the end of the episode.
+
+    Thread-safe for concurrent tool calls.
+    """
+
+    def __init__(self):
+        self._steps: list[dict] = []
+        self._lock  = threading.Lock()
+
+    def add(self, record: dict) -> None:
+        with self._lock:
+            self._steps.append(record)
+
+    def flush(self, swallow_errors: bool = True) -> None:
+        with self._lock:
+            steps = list(self._steps)
+            self._steps.clear()
+
+        if not steps:
+            return
+        try:
+            _post_batch("/steps/batch", steps)
+        except Exception as exc:
+            if not swallow_errors:
+                raise
+            import sys
+            print(f"[ageval] WARNING: batch flush failed: {exc}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# 5. Thread-safe step index counter
+# ---------------------------------------------------------------------------
+class _AtomicCounter:
+    """Thread-safe integer counter."""
+    def __init__(self, start: int = 0):
+        self._value = start
+        self._lock  = threading.Lock()
+
+    def next(self) -> int:
+        with self._lock:
+            v = self._value
+            self._value += 1
+            return v
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._value
+
+
+# ---------------------------------------------------------------------------
+# 6. @episodic_trace  (sync)
 # ---------------------------------------------------------------------------
 def episodic_trace(
     episode_id: str,
     step_index: int,
     llm_output: Optional[str] = None,
     swallow_write_errors: bool = True,
+    _batch_writer: Optional[BatchStepWriter] = None,
 ):
+    """
+    Decorator that wraps a sync tool function.
+
+    Args:
+        episode_id          : episode this step belongs to
+        step_index          : position in the episode (0-based)
+        llm_output          : raw LLM text to extract reasoning from
+        swallow_write_errors: if True, write failures print a warning
+                              instead of crashing the agent
+        _batch_writer       : optional BatchStepWriter; if provided,
+                              step is buffered instead of posted immediately
+    """
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             tool_name  = fn.__name__
             tool_input = {"args": list(args), "kwargs": kwargs}
             reasoning  = ReasoningExtractor.extract(llm_output)
-            writer     = StepWriter()
+            writer     = _batch_writer
 
             t0             = time.perf_counter()
             success        = False
@@ -197,7 +293,10 @@ def episodic_trace(
                     "created_at"    : datetime.now(timezone.utc).isoformat(),
                 }
                 try:
-                    writer.write(record)
+                    if writer is not None:
+                        writer.add(record)
+                    else:
+                        StepWriter().write(record)
                 except Exception as write_exc:
                     if not swallow_write_errors:
                         raise
@@ -208,19 +307,27 @@ def episodic_trace(
     return decorator
 
 
+# ---------------------------------------------------------------------------
+# 7. async_episodic_trace — uses asyncio.to_thread to avoid blocking
+# ---------------------------------------------------------------------------
 def async_episodic_trace(
     episode_id: str,
     step_index: int,
     llm_output: Optional[str] = None,
     swallow_write_errors: bool = True,
+    _batch_writer: Optional[BatchStepWriter] = None,
 ):
+    """
+    Async variant of episodic_trace.
+    The step write is offloaded to a thread so it never blocks the event loop.
+    """
     def decorator(fn: Callable) -> Callable:
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
             tool_name  = fn.__name__
             tool_input = {"args": list(args), "kwargs": kwargs}
             reasoning  = ReasoningExtractor.extract(llm_output)
-            writer     = StepWriter()
+            writer     = _batch_writer
 
             t0             = time.perf_counter()
             success        = False
@@ -256,20 +363,27 @@ def async_episodic_trace(
                     "latency_ms"    : latency_ms,
                     "created_at"    : datetime.now(timezone.utc).isoformat(),
                 }
-                try:
-                    writer.write(record)
-                except Exception as write_exc:
-                    if not swallow_write_errors:
-                        raise
-                    import sys
-                    print(f"[ageval] WARNING: async step write failed: {write_exc}", file=sys.stderr)
+                # Offload blocking I/O to a thread — never block the event loop
+                async def _write():
+                    try:
+                        if writer is not None:
+                            writer.add(record)
+                        else:
+                            await asyncio.to_thread(StepWriter().write, record)
+                    except Exception as write_exc:
+                        if not swallow_write_errors:
+                            raise
+                        import sys
+                        print(f"[ageval] WARNING: async step write failed: {write_exc}", file=sys.stderr)
+
+                asyncio.ensure_future(_write())
 
         return wrapper
     return decorator
 
 
 # ---------------------------------------------------------------------------
-# 5. JobPusher — now POSTs to API
+# 8. JobPusher
 # ---------------------------------------------------------------------------
 class JobPusher:
     def push(
@@ -289,23 +403,48 @@ class JobPusher:
 
 
 # ---------------------------------------------------------------------------
-# 6. EpisodeSession  (unchanged, but start() now POSTs to API)
+# 9. EpisodeSession — high-level context manager
 # ---------------------------------------------------------------------------
 class EpisodeSession:
+    """
+    High-level session that manages episode lifecycle.
+
+    Usage (basic):
+        session = EpisodeSession(agent_id="my_agent", task="do something")
+        session.start()
+        traced_fn = session.trace(my_tool_fn, reasoning=llm_text)
+        result = traced_fn(arg1, arg2)
+        session.finish()
+
+    Usage (context manager):
+        with EpisodeSession(agent_id="my_agent") as session:
+            session.start()
+            ...
+
+    Usage (batched — fewer HTTP calls):
+        session = EpisodeSession(agent_id="my_agent", batch=True)
+        session.start()
+        traced_fn = session.trace(my_tool_fn)
+        result = traced_fn(...)
+        session.finish()   # flushes all steps in one request
+    """
+
     def __init__(
         self,
         agent_id: str,
         task: str | None = None,
         swallow_write_errors: bool = True,
+        batch: bool = False,
     ):
         self.episode_id           = new_episode_id()
         self.agent_id             = agent_id
         self.task                 = task
         self.swallow_write_errors = swallow_write_errors
-        self._step_index          = 0
+        self._counter             = _AtomicCounter()        # thread-safe
         self._langsmith_run_id    = None
+        self._batch_writer        = BatchStepWriter() if batch else None
 
-    def start(self, langsmith_run_id: str | None = None):
+    def start(self, langsmith_run_id: str | None = None) -> "EpisodeSession":
         self._langsmith_run_id = langsmith_run_id or "pending"
         _post("/episodes", {
             "episode_id": self.episode_id,
@@ -314,20 +453,25 @@ class EpisodeSession:
         })
         return self
 
-    def set_run_id(self, run_id: str):
+    def set_run_id(self, run_id: str) -> None:
         self._langsmith_run_id = run_id
 
     def trace(self, fn: Callable, reasoning: str | None = None) -> Callable:
-        wrapped = episodic_trace(
+        """Wrap a tool function with episodic tracing. Returns the wrapped function."""
+        step_index = self._counter.next()
+        return episodic_trace(
             episode_id           = self.episode_id,
-            step_index           = self._step_index,
+            step_index           = step_index,
             llm_output           = reasoning,
             swallow_write_errors = self.swallow_write_errors,
+            _batch_writer        = self._batch_writer,
         )(fn)
-        self._step_index += 1
-        return wrapped
 
-    def finish(self):
+    def finish(self) -> str:
+        """Flush any buffered steps, then push the job to the merge queue."""
+        if self._batch_writer is not None:
+            self._batch_writer.flush(swallow_errors=self.swallow_write_errors)
+
         return JobPusher().push(
             episode_id = self.episode_id,
             run_id     = self._langsmith_run_id or "none",
@@ -335,12 +479,12 @@ class EpisodeSession:
             task       = self.task,
         )
 
-    def __enter__(self):
+    def __enter__(self) -> "EpisodeSession":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         self.finish()
-        return False
+        return False  # do not suppress exceptions
 
 
 # ---------------------------------------------------------------------------

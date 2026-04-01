@@ -11,14 +11,18 @@ Usage:
         task     = "plan a trip to Paris",
     )
 
-Required env vars:
-    AGEVAL_SUPABASE_URL         — AGeval project URL
-    AGEVAL_SUPABASE_SERVICE_KEY — service role key
-    LANGSMITH_API_KEY           — for trace fetching
-    LANGSMITH_PROJECT           — LangSmith project name
+Required env vars (user-side):
+    AGEVAL_API_KEY   — your ageval API key (the only thing you need)
+
+Optional:
+    AGEVAL_API_URL   — override the API base (default: ageval-production.up.railway.app)
+
+Fallback:
+    If AGEVAL_API_KEY is not set, trace_agent() falls back to a plain
+    agent.invoke() — no crashes, no overhead.
 """
 
 from ageval_package.tracer import trace_agent
 
-__all__ = ["trace_agent"]
-__version__ = "0.1.0"
+__all__    = ["trace_agent"]
+__version__ = "0.2.0"
