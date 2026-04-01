@@ -2,23 +2,15 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from episodic_sdk import episodic_trace, JobPusher, new_episode_id
+from sdk.episodic_sdk import episodic_trace, JobPusher, new_episode_id, EpisodeSession
 
-# --- generate one episode id for this test run ---
 ep_id = new_episode_id()
 print(f"episode_id: {ep_id}")
 
-# --- first, insert a stub episodes row (required by the FK) ---
-from supabase import create_client
-sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
-
-sb.table("episodes").insert({
-    "episode_id": ep_id,
-    "agent_id":   "test_agent",
-    "run_id":     "test_run_001",
-    "task":       "sdk smoke test",
-}).execute()
-print("episodes stub row inserted")
+# create episode via API (no direct Supabase)
+from sdk.episodic_sdk import _post
+_post("/episodes", {"episode_id": ep_id, "agent_id": "test_agent", "task": "sdk smoke test"})
+print("episode created via API")
 
 # --- test 1: successful tool call ---
 @episodic_trace(episode_id=ep_id, step_index=0, swallow_write_errors=False)
