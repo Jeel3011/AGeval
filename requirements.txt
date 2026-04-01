@@ -5,3 +5,4 @@ arq
 python-dotenv
 openai
 langchain_core
+uvicorn[standard]
