@@ -1,7 +1,6 @@
 supabase 
 langsmith 
 fastapi 
-arq 
 python-dotenv
 openai
 langchain_core

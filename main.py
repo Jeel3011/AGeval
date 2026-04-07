@@ -57,7 +57,7 @@ app = FastAPI(title="ageval ingestion API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.environ.get("AGEVAL_CORS_ORIGINS", "*").split(","),
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
@@ -76,11 +76,19 @@ async def rate_limit_middleware(request: Request, call_next):
     now = time.time()
     
     # Filter old requests
-    _rate_limits[client_ip] = [req_time for req_time in _rate_limits[client_ip] if now - req_time < RATE_LIMIT_WINDOW]
+    active_requests = [req_time for req_time in _rate_limits[client_ip] if now - req_time < RATE_LIMIT_WINDOW]
     
-    if len(_rate_limits[client_ip]) >= RATE_LIMIT_REQUESTS:
+    if active_requests:
+        _rate_limits[client_ip] = active_requests
+    elif client_ip in _rate_limits:
+        del _rate_limits[client_ip]
+        active_requests = []
+    
+    if len(active_requests) >= RATE_LIMIT_REQUESTS:
         return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
     
+    if client_ip not in _rate_limits:
+        _rate_limits[client_ip] = []
     _rate_limits[client_ip].append(now)
     return await call_next(request)
 
@@ -203,9 +211,16 @@ def health():
     return {"status": "ok", "version": "0.2.0"}
 
 
+ADMIN_SECRET = os.environ.get("AGEVAL_ADMIN_SECRET", "dev-secret")
+
 @app.post("/register", status_code=201)
-def register(body: RegisterRequest):
-    """Self-serve API key generation for onboarding."""
+def register(
+    body: RegisterRequest,
+    x_admin_secret: str = Header(None, description="Admin secret required for registration"),
+):
+    """Admin-only API key generation."""
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid admin secret")
     db = get_db()
     import uuid
     # Generate a secure key
@@ -511,20 +526,9 @@ def recall_episodes_api(
         rows = result.data or []
         
         if outcome:
-            filtered_rows = []
-            for r in rows:
-                ep_resp = (
-                    db.table("episodes")
-                    .select("outcome")
-                    .eq("episode_id", r["episode_id"])
-                    .limit(1)
-                    .execute()
-                )
-                if ep_resp.data and ep_resp.data[0].get("outcome") == outcome:
-                    filtered_rows.append(r)
-            rows = filtered_rows[:k]
-        else:
-            rows = rows[:k]
+            rows = [r for r in rows if r.get("outcome") == outcome]
+            
+        rows = rows[:k]
             
         return {"episodes": rows}
     except Exception as e:

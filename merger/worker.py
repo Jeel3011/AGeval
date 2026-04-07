@@ -131,6 +131,14 @@ def process_job(client, job: dict):
                 f"breakdown={score_result['breakdown']}"
             )
             
+            # --- LLM JUDGE ---
+            try:
+                from eval.llm_judge import judge_episode
+                judge_result = judge_episode(client, episode_id)
+                log.info(f"LLM judge scored {episode_id} | score={judge_result['score']}")
+            except Exception as judge_exc:
+                log.warning(f"LLM judge failed for {episode_id}: {judge_exc}")
+            
             # --- WEBHOOK TRIGGER ---
             try:
                 ep_resp = client.table("episodes").select("user_id").eq("episode_id", episode_id).execute()
@@ -142,18 +150,23 @@ def process_job(client, job: dict):
                             if score_val < float(hook["threshold"]):
                                 import urllib.request
                                 import json
+                                import threading
                                 payload = json.dumps({"episode_id": episode_id, "score": score_val}).encode()
-                                req = urllib.request.Request(
-                                    hook["url"],
-                                    data=payload,
-                                    headers={"Content-Type": "application/json"},
-                                    method="POST"
-                                )
-                                try:
-                                    with urllib.request.urlopen(req, timeout=5):
-                                        log.info(f"Webhook delivered to {hook['url']} for {episode_id}")
-                                except Exception as e:
-                                    log.warning(f"Webhook failed to {hook['url']}: {e}")
+
+                                def send_webhook(url, payload_data):
+                                    req = urllib.request.Request(
+                                        url,
+                                        data=payload_data,
+                                        headers={"Content-Type": "application/json"},
+                                        method="POST"
+                                    )
+                                    try:
+                                        with urllib.request.urlopen(req, timeout=2):
+                                            log.info(f"Webhook delivered to {url} for {episode_id}")
+                                    except Exception as e:
+                                        log.warning(f"Webhook failed to {url}: {e}")
+                                
+                                threading.Thread(target=send_webhook, args=(hook["url"], payload), daemon=True).start()
             except Exception as e:
                 log.warning(f"Failed to check webhooks for {episode_id}: {e}")
                 
