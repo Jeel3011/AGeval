@@ -124,11 +124,39 @@ def process_job(client, job: dict):
         # score immediately after every successful merge
         try:
             score_result = score_episode(client, episode_id)
+            score_val = float(score_result['score'])
             log.info(
                 f"Scored {episode_id} | "
-                f"score={score_result['score']} | "
+                f"score={score_val} | "
                 f"breakdown={score_result['breakdown']}"
             )
+            
+            # --- WEBHOOK TRIGGER ---
+            try:
+                ep_resp = client.table("episodes").select("user_id").eq("episode_id", episode_id).execute()
+                if ep_resp.data and ep_resp.data[0].get("user_id"):
+                    u_id = ep_resp.data[0]["user_id"]
+                    hooks_resp = client.table("webhooks").select("*").eq("user_id", u_id).eq("is_active", True).execute()
+                    if hooks_resp.data:
+                        for hook in hooks_resp.data:
+                            if score_val < float(hook["threshold"]):
+                                import urllib.request
+                                import json
+                                payload = json.dumps({"episode_id": episode_id, "score": score_val}).encode()
+                                req = urllib.request.Request(
+                                    hook["url"],
+                                    data=payload,
+                                    headers={"Content-Type": "application/json"},
+                                    method="POST"
+                                )
+                                try:
+                                    with urllib.request.urlopen(req, timeout=5):
+                                        log.info(f"Webhook delivered to {hook['url']} for {episode_id}")
+                                except Exception as e:
+                                    log.warning(f"Webhook failed to {hook['url']}: {e}")
+            except Exception as e:
+                log.warning(f"Failed to check webhooks for {episode_id}: {e}")
+                
         except Exception as score_exc:
             # scoring failure never kills the worker or the job
             log.error(f"Scoring failed for {episode_id}: {score_exc}")

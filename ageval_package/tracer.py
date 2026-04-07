@@ -31,6 +31,7 @@ import json
 import logging
 import threading
 import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -120,6 +121,26 @@ def _api_post(path: str, payload: dict, swallow: bool = True) -> dict | None:
         raise
 
 
+def _api_get(path: str, swallow: bool = True) -> dict | None:
+    """GET from the ageval ingestion API."""
+    try:
+        url = f"{_get_api_base()}{path}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {_get_api_key()}",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception as exc:
+        if swallow:
+            log.warning(f"[ageval] API get to {path} failed: {exc}")
+            return None
+        raise
+
+
 def _api_configured() -> bool:
     return bool(os.environ.get("AGEVAL_API_KEY"))
 
@@ -127,6 +148,26 @@ def _api_configured() -> bool:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+def recall_episodes(task: str, k: int = 3) -> list[dict]:
+    """Retrieve past episodes relevant to the given task."""
+    if not _api_configured():
+        log.warning("[ageval] AGEVAL_API_KEY not set - running without API")
+        return []
+    qs = urllib.parse.urlencode({"task": task, "k": k})
+    resp = _api_get(f"/recall?{qs}", swallow=False)
+    if resp and "episodes" in resp:
+        return resp["episodes"]
+    return []
+
+def compare_episodes(episode_a: str, episode_b: str) -> dict:
+    """Compare two past episodes to see differences."""
+    if not _api_configured():
+        return {}
+    qs = urllib.parse.urlencode({"episode_a": episode_a, "episode_b": episode_b})
+    resp = _api_get(f"/compare?{qs}", swallow=False)
+    return resp or {}
+
 
 def trace_agent(
     agent,

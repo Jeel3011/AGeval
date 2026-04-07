@@ -22,7 +22,7 @@ Fallback:
     agent.invoke() — no crashes, no overhead.
 """
 
-from ageval_package.tracer import trace_agent
+from ageval_package.tracer import trace_agent, recall_episodes, compare_episodes
 
-__all__    = ["trace_agent"]
+__all__    = ["trace_agent", "recall_episodes", "compare_episodes"]
 __version__ = "0.2.0"

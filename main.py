@@ -44,8 +44,11 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+import time
+from collections import defaultdict
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -58,6 +61,28 @@ app.add_middleware(
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Rate Limiting Middleware
+# ---------------------------------------------------------------------------
+RATE_LIMIT_WINDOW = 60
+RATE_LIMIT_REQUESTS = 100
+_rate_limits = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # Simple in-memory rate limiting by IP
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    
+    # Filter old requests
+    _rate_limits[client_ip] = [req_time for req_time in _rate_limits[client_ip] if now - req_time < RATE_LIMIT_WINDOW]
+    
+    if len(_rate_limits[client_ip]) >= RATE_LIMIT_REQUESTS:
+        return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
+    
+    _rate_limits[client_ip].append(now)
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +148,23 @@ class EpisodeCreate(BaseModel):
     task      : str | None = None
 
 
+def _generate_embedding(text: str) -> list[float] | None:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from openai import OpenAI
+        oc = OpenAI(api_key=api_key)
+        resp = oc.embeddings.create(
+            model="text-embedding-3-small",
+            input=text,
+        )
+        return resp.data[0].embedding
+    except Exception as exc:
+        log.error(f"Embedding generation failed: {exc}")
+        return None
+
+
 class StepCreate(BaseModel):
     episode_id     : str
     step_index     : int
@@ -144,12 +186,43 @@ class JobCreate(BaseModel):
     task      : str | None = None
 
 
+class RegisterRequest(BaseModel):
+    label: str | None = "default"
+
+
+class WebhookCreate(BaseModel):
+    url      : str
+    threshold: float = 0.7
+
+
 # ---------------------------------------------------------------------------
-# Endpoints — utility
+# Endpoints — utility & onboarding
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok", "version": "0.2.0"}
+
+
+@app.post("/register", status_code=201)
+def register(body: RegisterRequest):
+    """Self-serve API key generation for onboarding."""
+    db = get_db()
+    import uuid
+    # Generate a secure key
+    raw_key = f"ageval-sk-{uuid.uuid4().hex}"
+    key_hash = _hash_key(raw_key)
+    user_id = f"usr_{uuid.uuid4().hex[:16]}"
+    
+    try:
+        db.table("api_keys").insert({
+            "key_hash": key_hash,
+            "user_id" : user_id,
+            "label"   : body.label or "",
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return {"api_key": raw_key, "user_id": user_id}
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +337,25 @@ def create_steps_batch(
         raise HTTPException(status_code=500, detail=str(e))
 
     return {"ok": True, "inserted": len(records)}
+
+
+@app.post("/webhooks", status_code=201)
+def create_webhook(
+    body   : WebhookCreate,
+    user_id: str = Depends(verify_api_key),
+):
+    """Register a webhook URL to be notified on low scores."""
+    db = get_db()
+    try:
+        db.table("webhooks").insert({
+            "user_id"  : user_id,
+            "url"      : body.url,
+            "threshold": body.threshold,
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return {"ok": True, "url": body.url}
 
 
 @app.post("/jobs", status_code=201)
@@ -392,6 +484,76 @@ def get_episode_steps(
         .execute()
     )
     return {"episode_id": episode_id, "steps": resp.data or []}
+
+
+@app.get("/recall")
+def recall_episodes_api(
+    task   : str = Query(..., description="Task string to embed and search"),
+    k      : int = Query(3, ge=1, le=50, description="Number of episodes to return"),
+    outcome: str | None = Query(None, description="Outcome filter e.g. success"),
+    user_id: str = Depends(verify_api_key),
+):
+    """Find the k most relevant past episodes for a given task."""
+    db = get_db()
+    embedding = _generate_embedding(task)
+    if not embedding:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key not configured, cannot generate embeddings for task.",
+        )
+        
+    try:
+        result = db.rpc("match_episodes", {
+            "query_embedding": embedding,
+            "match_count"    : k * 3,  # overfetch if we need to filter outcome
+            "filter_user_id" : user_id,
+        }).execute()
+        rows = result.data or []
+        
+        if outcome:
+            filtered_rows = []
+            for r in rows:
+                ep_resp = (
+                    db.table("episodes")
+                    .select("outcome")
+                    .eq("episode_id", r["episode_id"])
+                    .limit(1)
+                    .execute()
+                )
+                if ep_resp.data and ep_resp.data[0].get("outcome") == outcome:
+                    filtered_rows.append(r)
+            rows = filtered_rows[:k]
+        else:
+            rows = rows[:k]
+            
+        return {"episodes": rows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recall search failed: {e}")
+
+
+@app.get("/compare")
+def compare_episodes_api(
+    episode_a: str = Query(...),
+    episode_b: str = Query(...),
+    user_id  : str = Depends(verify_api_key),
+):
+    """Diff two episodes."""
+    db = get_db()
+    _assert_episode_owned(db, episode_a, user_id)
+    _assert_episode_owned(db, episode_b, user_id)
+    
+    ep_a_resp = db.table("episodes").select("*").eq("episode_id", episode_a).execute()
+    ep_b_resp = db.table("episodes").select("*").eq("episode_id", episode_b).execute()
+    
+    steps_a_resp = db.table("episode_steps").select("*").eq("episode_id", episode_a).order("step_index").execute()
+    steps_b_resp = db.table("episode_steps").select("*").eq("episode_id", episode_b).order("step_index").execute()
+    
+    return {
+        "episode_a": ep_a_resp.data[0] if ep_a_resp.data else None,
+        "episode_b": ep_b_resp.data[0] if ep_b_resp.data else None,
+        "steps_a"  : steps_a_resp.data or [],
+        "steps_b"  : steps_b_resp.data or [],
+    }
 
 
 @app.get("/similar")

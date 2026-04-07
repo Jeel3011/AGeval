@@ -248,3 +248,20 @@ language sql stable as $$
     order by ee.embedding <=> query_embedding
     limit match_count;
 $$;
+
+
+-- ============================================================
+-- webhooks
+-- Stores user-configured webhook URLs for score alerts.
+-- ============================================================
+create table if not exists webhooks (
+    id          uuid        primary key default gen_random_uuid(),
+    user_id     text        not null,
+    url         text        not null,
+    threshold   numeric     not null default 0.7,
+    is_active   boolean     not null default true,
+    created_at  timestamptz not null default now()
+);
+
+create index if not exists idx_webhooks_user
+    on webhooks (user_id);
