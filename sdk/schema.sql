@@ -22,17 +22,25 @@ create extension if not exists vector;
 alter table if exists episodes
     add column if not exists user_id text;
 
+-- episodes: add final_output for grounded LLM judging
+alter table if exists episodes
+    add column if not exists final_output jsonb;
+
 -- episode_jobs: add user_id if missing
 alter table if exists episode_jobs
     add column if not exists user_id text;
 
+-- episode_jobs: add scheduled_at for non-blocking not-ready requeue
+alter table if exists episode_jobs
+    add column if not exists scheduled_at timestamptz;
+
 -- Drop the old trigger first so we can recreate it cleanly
--- (CREATE OR REPLACE doesn't work for triggers, only for functions)
 drop trigger if exists episode_jobs_updated_at on episode_jobs;
 
--- Drop functions before recreating — CREATE OR REPLACE cannot change return type
+-- Drop functions before recreating
 drop function if exists pick_next_job();
 drop function if exists match_episodes(vector, int, text);
+drop function if exists reclaim_stale_jobs(timestamptz);
 
 
 -- ============================================================
@@ -60,7 +68,7 @@ create index if not exists idx_api_keys_hash
 create table if not exists episode_jobs (
     id              uuid        primary key default gen_random_uuid(),
     episode_id      text        not null unique,
-    run_id          text        not null,           -- LangSmith run ID
+    run_id          text        not null,           -- LangSmith run ID (or 'none')
     agent_id        text        not null,
     user_id         text,                           -- scoped per user
     task            text,                           -- human-readable task description
@@ -68,14 +76,15 @@ create table if not exists episode_jobs (
                                 check (status in ('pending','processing','done','failed')),
     retry_count     int         not null default 0,
     locked_at       timestamptz,                    -- set when worker picks it up
+    scheduled_at    timestamptz,                    -- not-ready jobs: don't pick before this time
     error_message   text,
     created_at      timestamptz not null default now(),
     updated_at      timestamptz not null default now()
 );
 
--- Index for the poll query: SELECT FOR UPDATE SKIP LOCKED WHERE status='pending'
+-- Index for the poll query
 create index if not exists idx_episode_jobs_status
-    on episode_jobs (status, created_at);
+    on episode_jobs (status, scheduled_at, created_at);
 
 create index if not exists idx_episode_jobs_user
     on episode_jobs (user_id, created_at);
@@ -99,16 +108,17 @@ create trigger episode_jobs_updated_at
 -- One row per completed agent run (written by merger).
 -- ============================================================
 create table if not exists episodes (
-    id              uuid        primary key default gen_random_uuid(),
-    episode_id      text        not null unique,
-    agent_id        text        not null,
-    user_id         text,                           -- scoped per user
-    run_id          text        not null,
-    task            text,
-    outcome         text,                           -- 'success' | 'failure' | 'partial'
-    total_steps     int,
+    id               uuid        primary key default gen_random_uuid(),
+    episode_id       text        not null unique,
+    agent_id         text        not null,
+    user_id          text,                           -- scoped per user
+    run_id           text        not null,
+    task             text,
+    outcome          text,                           -- 'success' | 'failure' | 'partial'
+    total_steps      int,
     total_latency_ms int,
-    created_at      timestamptz not null default now()
+    final_output     jsonb,                          -- final agent output for grounded judging
+    created_at       timestamptz not null default now()
 );
 
 create index if not exists idx_episodes_agent
@@ -187,6 +197,7 @@ create index if not exists idx_episode_scores_episode
 -- Atomically picks one pending job, marks it 'processing'.
 -- Uses SELECT FOR UPDATE SKIP LOCKED so multiple workers never
 -- grab the same job.
+-- Honors scheduled_at: skips jobs that aren't due yet.
 -- ============================================================
 create or replace function pick_next_job()
 returns setof episode_jobs
@@ -199,10 +210,30 @@ language sql as $$
         select id
         from   episode_jobs
         where  status = 'pending'
+          and  (scheduled_at is null or scheduled_at <= now())
         order  by created_at asc
         limit  1
         for update skip locked
     )
+    returning *;
+$$;
+
+
+-- ============================================================
+-- reclaim_stale_jobs
+-- Reclaims jobs stuck in 'processing' (dead workers) back to 'pending'.
+-- Call this periodically from the worker process.
+-- ============================================================
+create or replace function reclaim_stale_jobs(cutoff_time timestamptz)
+returns setof episode_jobs
+language sql as $$
+    update episode_jobs
+    set
+        status    = 'pending',
+        locked_at = null,
+        error_message = 'reclaimed_stale'
+    where status = 'processing'
+      and locked_at < cutoff_time
     returning *;
 $$;
 
@@ -265,3 +296,26 @@ create table if not exists webhooks (
 
 create index if not exists idx_webhooks_user
     on webhooks (user_id);
+
+
+-- ============================================================
+-- webhook_deliveries
+-- Audit trail for webhook delivery attempts.
+-- Allows users to inspect failed deliveries.
+-- ============================================================
+create table if not exists webhook_deliveries (
+    id          uuid        primary key default gen_random_uuid(),
+    webhook_id  uuid,                               -- references webhooks.id
+    episode_id  text,
+    status      text        not null default 'pending'
+                            check (status in ('pending','delivered','failed')),
+    attempts    int         not null default 0,
+    last_error  text,
+    created_at  timestamptz not null default now()
+);
+
+create index if not exists idx_webhook_deliveries_webhook
+    on webhook_deliveries (webhook_id, created_at desc);
+
+create index if not exists idx_webhook_deliveries_episode
+    on webhook_deliveries (episode_id);

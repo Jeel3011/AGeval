@@ -144,22 +144,44 @@ class ErrorClassifier:
 # 2. Reasoning extractor
 # ---------------------------------------------------------------------------
 class ReasoningExtractor:
-    _TAG_RE  = re.compile(r"<reasoning[^>]*>(.*?)</reasoning>", re.DOTALL | re.IGNORECASE)
+    """Extract reasoning/chain-of-thought from various LLM output formats."""
+
+    # XML-style tags: <reasoning>...</reasoning> or <thinking>...</thinking>
+    _TAG_RE = re.compile(
+        r"<(?:reasoning|thinking)[^>]*>(.*?)</(?:reasoning|thinking)>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    # ReACT-style: Thought: / Reasoning: / Think:
     _REACT_RE = re.compile(
         r"^(?:thought|reasoning|think)[:\s]+(.+?)(?=\n(?:action|tool|observation)|$)",
         re.DOTALL | re.IGNORECASE | re.MULTILINE,
     )
+    # OpenAI function-call style: content before the first tool_call
+    _OPENAI_RE = re.compile(
+        r"^(.+?)(?=\n(?:```|\{\s*\"type\"\s*:|function_call|tool_call))",
+        re.DOTALL,
+    )
 
     @classmethod
     def extract(cls, llm_output: Optional[str]) -> Optional[str]:
-        if not llm_output:
+        if not llm_output or not llm_output.strip():
             return None
+        # 1. XML/tag format (<reasoning> or <thinking>)
         m = cls._TAG_RE.search(llm_output)
         if m:
-            return m.group(1).strip()
+            return m.group(1).strip() or None
+        # 2. ReACT format (Thought: / Think:)
         m = cls._REACT_RE.search(llm_output)
         if m:
-            return m.group(1).strip()
+            extracted = m.group(1).strip()
+            return extracted or None
+        # 3. OpenAI content before tool call block
+        m = cls._OPENAI_RE.search(llm_output)
+        if m:
+            text = m.group(1).strip()
+            # Only use if it looks like a reasoning sentence (>20 chars, no JSON)
+            if len(text) > 20 and not text.startswith("{"):
+                return text
         return None
 
 
@@ -363,20 +385,18 @@ def async_episodic_trace(
                     "latency_ms"    : latency_ms,
                     "created_at"    : datetime.now(timezone.utc).isoformat(),
                 }
-                # Offload blocking I/O to a thread — never block the event loop
-                async def _write():
-                    try:
-                        if writer is not None:
-                            writer.add(record)
-                        else:
-                            await asyncio.to_thread(StepWriter().write, record)
-                    except Exception as write_exc:
-                        if not swallow_write_errors:
-                            raise
-                        import sys
-                        print(f"[ageval] WARNING: async step write failed: {write_exc}", file=sys.stderr)
-
-                asyncio.ensure_future(_write())
+                # Await the write directly — ensure_future was dropping writes
+                # on short-lived event loops. Use asyncio.to_thread for blocking I/O.
+                try:
+                    if writer is not None:
+                        writer.add(record)
+                    else:
+                        await asyncio.to_thread(StepWriter().write, record)
+                except Exception as write_exc:
+                    if not swallow_write_errors:
+                        raise
+                    import sys
+                    print(f"[ageval] WARNING: async step write failed: {write_exc}", file=sys.stderr)
 
         return wrapper
     return decorator

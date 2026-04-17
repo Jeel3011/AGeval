@@ -36,10 +36,13 @@ Env vars needed on YOUR server (not the user's):
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import os
+import socket
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -177,8 +180,8 @@ class StepCreate(BaseModel):
     episode_id     : str
     step_index     : int
     tool_name      : str
-    tool_input     : dict | None = None
-    tool_output    : dict | None = None
+    tool_input     : Any | None = None   # accepts dict, str, list, int — any JSON value
+    tool_output    : Any | None = None   # accepts dict, str, list, int — any JSON value
     success        : bool
     error_message  : str | None = None
     error_category : str | None = None   # 'agent_error' | 'env_error' | 'unknown'
@@ -204,6 +207,47 @@ class WebhookCreate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# SSRF-safe webhook URL validator
+# ---------------------------------------------------------------------------
+_PRIVATE_RANGES = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+]
+
+
+def _validate_webhook_url(url: str) -> None:
+    """
+    Raises HTTPException(400) if the URL points to a private/internal IP range
+    (SSRF protection) or uses a non-https scheme.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("https", "http"):
+        raise HTTPException(status_code=400, detail="Webhook URL must use http or https scheme")
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="Webhook URL has no valid hostname")
+    try:
+        addr_str = socket.gethostbyname(hostname)
+        addr = ipaddress.ip_address(addr_str)
+        for network in _PRIVATE_RANGES:
+            if addr in network:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Webhook URL resolves to a private/internal IP address ({addr_str}) — not allowed",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        # DNS resolution failed — reject to be safe
+        raise HTTPException(status_code=400, detail=f"Webhook URL hostname could not be resolved: {hostname}")
+
+
+# ---------------------------------------------------------------------------
 # Endpoints — utility & onboarding
 # ---------------------------------------------------------------------------
 @app.get("/health")
@@ -211,23 +255,33 @@ def health():
     return {"status": "ok", "version": "0.2.0"}
 
 
-ADMIN_SECRET = os.environ.get("AGEVAL_ADMIN_SECRET", "dev-secret")
+ADMIN_SECRET = os.environ.get("AGEVAL_ADMIN_SECRET")  # NO default — must be explicitly set
 
 @app.post("/register", status_code=201)
 def register(
     body: RegisterRequest,
     x_admin_secret: str = Header(None, description="Admin secret required for registration"),
 ):
-    """Admin-only API key generation."""
+    """
+    Admin-only API key generation.
+
+    SECURITY: This endpoint is disabled if AGEVAL_ADMIN_SECRET is not set in the environment.
+    Never deploy without setting this env var to a strong random secret.
+    """
+    if not ADMIN_SECRET:
+        raise HTTPException(
+            status_code=403,
+            detail="Registration is disabled. AGEVAL_ADMIN_SECRET is not configured on this server.",
+        )
     if x_admin_secret != ADMIN_SECRET:
         raise HTTPException(status_code=401, detail="Invalid admin secret")
     db = get_db()
-    import uuid
-    # Generate a secure key
-    raw_key = f"ageval-sk-{uuid.uuid4().hex}"
+    import uuid, secrets
+    # Generate a cryptographically secure key (48 hex chars = 192 bits of entropy)
+    raw_key = f"ageval-sk-{secrets.token_hex(24)}"
     key_hash = _hash_key(raw_key)
     user_id = f"usr_{uuid.uuid4().hex[:16]}"
-    
+
     try:
         db.table("api_keys").insert({
             "key_hash": key_hash,
@@ -236,7 +290,8 @@ def register(
         }).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
+    log.info(f"API key issued for user={user_id} label='{body.label}'")
     return {"api_key": raw_key, "user_id": user_id}
 
 
@@ -359,7 +414,13 @@ def create_webhook(
     body   : WebhookCreate,
     user_id: str = Depends(verify_api_key),
 ):
-    """Register a webhook URL to be notified on low scores."""
+    """
+    Register a webhook URL to be notified on low scores.
+    URL is validated against SSRF blocklist at registration time.
+    """
+    # Validate URL for SSRF safety before storing
+    _validate_webhook_url(body.url)
+
     db = get_db()
     try:
         db.table("webhooks").insert({
@@ -369,7 +430,7 @@ def create_webhook(
         }).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-        
+
     return {"ok": True, "url": body.url}
 
 
@@ -485,9 +546,11 @@ def get_episode(
 @app.get("/episodes/{episode_id}/steps")
 def get_episode_steps(
     episode_id: str,
+    limit     : int = Query(100, ge=1, le=500, description="Max steps to return"),
+    offset    : int = Query(0,   ge=0,         description="Offset for pagination"),
     user_id   : str = Depends(verify_api_key),
 ):
-    """Get all steps for an episode, ordered by step_index."""
+    """Get steps for an episode, ordered by step_index. Supports pagination."""
     db = get_db()
     _assert_episode_owned(db, episode_id, user_id)
 
@@ -496,9 +559,35 @@ def get_episode_steps(
         .select("*")
         .eq("episode_id", episode_id)
         .order("step_index")
+        .range(offset, offset + limit - 1)
         .execute()
     )
-    return {"episode_id": episode_id, "steps": resp.data or []}
+    return {"episode_id": episode_id, "steps": resp.data or [], "limit": limit, "offset": offset}
+
+
+@app.get("/jobs/{episode_id}/status")
+def get_job_status(
+    episode_id: str,
+    user_id   : str = Depends(verify_api_key),
+):
+    """
+    Poll the merge job status for an episode.
+    Returns status: pending | processing | done | failed
+    """
+    db = get_db()
+    _assert_episode_owned(db, episode_id, user_id)
+
+    resp = (
+        db.table("episode_jobs")
+        .select("status, retry_count, error_message, created_at, updated_at")
+        .eq("episode_id", episode_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"No job found for episode {episode_id}")
+
+    return {"episode_id": episode_id, **resp.data[0]}
 
 
 @app.get("/recall")

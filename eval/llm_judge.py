@@ -115,6 +115,7 @@ def judge_episode(
 def _build_prompt(episode: dict, steps: list[dict]) -> str:
     task    = episode.get("task") or "unspecified"
     outcome = episode.get("outcome") or "unknown"
+    final_output = episode.get("final_output")
 
     steps_text = "\n".join(
         f"  Step {s['step_index']}: {s['tool_name']} → "
@@ -123,6 +124,17 @@ def _build_prompt(episode: dict, steps: list[dict]) -> str:
         + (f" | latency: {s.get('latency_ms', 0)}ms")
         for s in steps
     )
+
+    # Format final output for the judge; handle None gracefully
+    if final_output:
+        import json as _json
+        final_output_text = _json.dumps(final_output, indent=2)[:800]  # cap at 800 chars
+        output_section = f"\n## Final Agent Output\n```json\n{final_output_text}\n```"
+    else:
+        output_section = (
+            "\n## Final Agent Output\n"
+            "*Not available — score output_quality based on tool traces and outcome only.*"
+        )
 
     return f"""You are an expert AI agent evaluator. Score the following agent episode.
 
@@ -134,6 +146,7 @@ def _build_prompt(episode: dict, steps: list[dict]) -> str:
 
 ## Agent Behaviour (step-by-step)
 {steps_text}
+{output_section}
 
 ## Your Task
 Score the agent on these four dimensions. Be strict and honest.
@@ -154,6 +167,8 @@ Score the agent on these four dimensions. Be strict and honest.
    - 0.0 = crashed on first error or stuck in a loop
 
 4. **output_quality** (0.0–1.0): Is the final output useful and accurate?
+   - If the final output is provided above, base your score on it directly.
+   - If only tool traces are available, infer from the outcome and tool results.
    - 1.0 = excellent output, clearly answers the task
    - 0.5 = partially useful
    - 0.0 = no output or incorrect / irrelevant output
@@ -248,7 +263,7 @@ def _resolve_weights(weights: dict[str, float] | None) -> dict[str, float]:
 def _fetch_episode_data(client, episode_id: str) -> tuple[dict, list[dict]]:
     ep_resp = (
         client.table("episodes")
-        .select("episode_id, agent_id, task, outcome, total_steps, total_latency_ms")
+        .select("episode_id, agent_id, task, outcome, total_steps, total_latency_ms, final_output")
         .eq("episode_id", episode_id)
         .limit(1)
         .execute()

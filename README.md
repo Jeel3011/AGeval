@@ -1,8 +1,19 @@
 # ageval
 
-Episodic evaluation framework for LangGraph agents.
-Traces every tool call, scores agent behaviour, stores embeddings.
-**Zero changes to your agent code.**
+Episodic evaluation framework for LLM agents.
+Traces every tool call, scores agent behaviour, stores embeddings for similarity search.
+
+---
+
+## Supported Frameworks
+
+| Framework | Integration path | Effort |
+|-----------|-----------------|--------|
+| **LangGraph / LangChain** | `trace_agent()` — one-line drop-in | Zero changes |
+| **AutoGen, CrewAI, custom loops** | `EpisodeSession` + `@episodic_trace` | Wrap each tool call |
+| **Any async agent** | `async_episodic_trace` decorator | Wrap each tool call |
+
+> **Note:** The LangSmith dependency is fully optional. Pass `run_id="none"` to score using only your step data.
 
 ---
 
@@ -13,7 +24,7 @@ Traces every tool call, scores agent behaviour, stores embeddings.
 pip install ageval
 
 # or directly from GitHub
-pip install git+https://github.com/Jeel3011/AGeval.git#subdirectory=ageval_package
+pip install git+https://github.com/Jeel3011/AGeval.git#subdirectory=ageval
 ```
 
 ---
@@ -61,12 +72,12 @@ For every tool call your agent makes:
 | Field | What it means |
 |---|---|
 | `tool_name` | Which tool was called |
-| `tool_input` | What was passed in |
-| `tool_output` | What came back |
+| `tool_input` | What was passed in (dict, str, list — any JSON) |
+| `tool_output` | What came back (dict, str, list — any JSON) |
 | `success` | Did it work |
 | `error_category` | `agent_error` / `env_error` / `unknown` |
 | `is_recoverable` | Should the agent retry |
-| `reasoning` | Why the agent made this call (from LLM output) |
+| `reasoning` | Why the agent made this call (extracted from LLM output) |
 | `latency_ms` | How long it took |
 
 ---
@@ -86,7 +97,8 @@ Deterministic, no LLM required:
 | `efficiency_score` | Penalises back-to-back duplicate tool calls |
 
 ### LLM judge (`eval/llm_judge.py`)
-Uses GPT-4o-mini to evaluate:
+Uses GPT-4o-mini to evaluate (requires `OPENAI_API_KEY`).
+The judge receives the full step trace **and** the final agent output for grounded scoring:
 
 | Metric | What it measures |
 |---|---|
@@ -97,69 +109,27 @@ Uses GPT-4o-mini to evaluate:
 
 Both scorers write to `episode_scores` with their respective `scorer` name.
 
-### Custom weights
+---
+
+## Dashboard
+
+Open `dashboard/index.html` in your browser — no build step required.
+
+Features:
+- **Episode list** with outcome badges and score bars
+- **Step timeline** — click any step to see reasoning and tool output
+- **Rule score + LLM judge score breakdown**
+- **Compare** two episodes side-by-side
+- **Recall** — find past runs similar to any task (semantic search)
+
+The dashboard asks for your API key on first load and stores it in `sessionStorage` only.
+
+---
+
+## Lower-level SDK (for fine-grained control — any framework)
 
 ```python
-from eval.rules import score_episode
-
-result = score_episode(client, episode_id, weights={
-    "success_rate"      : 0.4,
-    "recovery_rate"     : 0.3,
-    "reasoning_coverage": 0.15,
-    "efficiency_score"  : 0.15,
-})
-```
-
----
-
-## Query API
-
-After episodes are processed, query your data:
-
-```bash
-# List your episodes
-GET /episodes?agent_id=my_agent_v1&limit=20
-
-# Get full episode detail (steps + scores)
-GET /episodes/ep_3f8a1c2d4e5b6f7a
-
-# Get steps only
-GET /episodes/ep_3f8a1c2d4e5b6f7a/steps
-
-# Find similar episodes (requires embeddings)
-GET /similar?episode_id=ep_3f8a1c2d4e5b6f7a&k=5
-```
-
-All requests require `Authorization: Bearer ageval-sk-<your-key>`.
-
----
-
-## Run the merger worker (server-side)
-
-```bash
-# Env vars needed on the SERVER (not the user's machine):
-AGEVAL_SUPABASE_URL=...
-AGEVAL_SUPABASE_SERVICE_KEY=...
-LANGSMITH_API_KEY=...
-OPENAI_API_KEY=...   # optional — for embeddings + LLM judge
-
-python -m merger.worker
-```
-
----
-
-## If tracing is not configured
-
-If `AGEVAL_API_KEY` is not set, `trace_agent()` falls back to a plain
-`agent.invoke()` — your agent runs normally with zero overhead.
-No crashes, no exceptions.
-
----
-
-## Lower-level SDK (for fine-grained control)
-
-```python
-from sdk import EpisodeSession
+from sdk.episodic_sdk import EpisodeSession
 
 with EpisodeSession(agent_id="my_agent", task="do something") as session:
     session.start()
@@ -178,6 +148,63 @@ traced(args)
 session.finish()   # flushes all steps in one POST
 ```
 
+For non-LangChain agents, simply omit `langsmith_run_id` (or pass `None`) — the
+merger will score using step data only.
+
+---
+
+## Query API
+
+After episodes are processed, query your data:
+
+```bash
+# List your episodes
+GET /episodes?agent_id=my_agent_v1&limit=20
+
+# Get full episode detail (steps + scores)
+GET /episodes/ep_3f8a1c2d4e5b6f7a
+
+# Get steps only (paginated)
+GET /episodes/ep_3f8a1c2d4e5b6f7a/steps?limit=50&offset=0
+
+# Poll merge job status
+GET /jobs/ep_3f8a1c2d4e5b6f7a/status
+
+# Find similar episodes (requires embeddings)
+GET /similar?episode_id=ep_3f8a1c2d4e5b6f7a&k=5
+
+# Search episode memory by task description
+GET /recall?task=plan+a+trip+to+Paris&k=5
+```
+
+All requests require `Authorization: Bearer ageval-sk-<your-key>`.
+
+---
+
+## Run the merger worker (server-side)
+
+```bash
+# Required on the SERVER only:
+AGEVAL_SUPABASE_URL=...
+AGEVAL_SUPABASE_SERVICE_KEY=...
+AGEVAL_ADMIN_SECRET=...      # required — no default, must be set explicitly
+
+# Optional:
+OPENAI_API_KEY=...           # for embeddings + LLM judge
+LANGSMITH_API_KEY=...        # only needed for LangChain agents
+AGEVAL_WEBHOOK_SECRET=...    # signs webhook payloads (HMAC-SHA256)
+
+python -m merger.worker
+```
+
+---
+
+## If tracing is not configured
+
+If `AGEVAL_API_KEY` is not set, `trace_agent()` falls back to a plain
+`agent.invoke()` — your agent runs normally with zero overhead.
+No crashes, no exceptions.
+
 ---
 
 ## Run tests
@@ -189,9 +216,9 @@ pytest tests/ -v
 
 ---
 
-## Supported frameworks
+## Security notes
 
-- LangGraph (any graph compiled with `.compile()`)
-- LangChain agents (any chain with `.invoke()`)
-- Any agent that accepts a LangChain `callbacks` config parameter
-- Manual integration via `@episodic_trace` decorator or `EpisodeSession`
+- The `/register` endpoint is **disabled** unless `AGEVAL_ADMIN_SECRET` is set on the server.
+  Never deploy without explicitly setting this to a strong random value.
+- Webhook URLs are validated against SSRF blocklists at registration time.
+- API keys are stored as SHA-256 hashes only — the raw key is never stored.

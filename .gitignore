@@ -26,3 +26,4 @@ sdk/produce_trace.py
 sdk/produce_realistic_trace.py
 merger/test_merger.py
 eval/test_rules.py
+PRODUCTION.md
