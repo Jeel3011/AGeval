@@ -9,14 +9,13 @@ Run with:
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from sdk.episodic_sdk import (
     ErrorClassifier,
     ErrorCategory,
     ReasoningExtractor,
     episodic_trace,
-    async_episodic_trace,
     EpisodeSession,
     BatchStepWriter,
     _AtomicCounter,

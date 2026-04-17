@@ -404,7 +404,8 @@ def register(
     if x_admin_secret != ADMIN_SECRET:
         raise HTTPException(status_code=401, detail="Invalid admin secret")
     db = get_db()
-    import uuid, secrets
+    import uuid
+    import secrets
     # Generate a cryptographically secure key (48 hex chars = 192 bits of entropy)
     raw_key = f"ageval-sk-{secrets.token_hex(24)}"
     key_hash = _hash_key(raw_key)
@@ -777,7 +778,7 @@ def recall_episodes_api(
             status_code=503,
             detail="OpenAI API key not configured, cannot generate embeddings for task.",
         )
-        
+
     try:
         result = db.rpc("match_episodes", {
             "query_embedding": embedding,
@@ -785,12 +786,12 @@ def recall_episodes_api(
             "filter_user_id" : user_id,
         }).execute()
         rows = result.data or []
-        
+
         if outcome:
             rows = [r for r in rows if r.get("outcome") == outcome]
-            
+
         rows = rows[:k]
-            
+
         return {"episodes": rows}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recall search failed: {e}")
@@ -806,13 +807,13 @@ def compare_episodes_api(
     db = get_db()
     _assert_episode_owned(db, episode_a, user_id)
     _assert_episode_owned(db, episode_b, user_id)
-    
+
     ep_a_resp = db.table("episodes").select("*").eq("episode_id", episode_a).execute()
     ep_b_resp = db.table("episodes").select("*").eq("episode_id", episode_b).execute()
-    
+
     steps_a_resp = db.table("episode_steps").select("*").eq("episode_id", episode_a).order("step_index").execute()
     steps_b_resp = db.table("episode_steps").select("*").eq("episode_id", episode_b).order("step_index").execute()
-    
+
     return {
         "episode_a": ep_a_resp.data[0] if ep_a_resp.data else None,
         "episode_b": ep_b_resp.data[0] if ep_b_resp.data else None,
@@ -910,7 +911,7 @@ def rotate_key(
 
     The old key stops working after this call returns.
     """
-    import uuid, secrets
+    import secrets
 
     raw_old  = authorization.removeprefix("Bearer ").strip()
     old_hash = _hash_key(raw_old)

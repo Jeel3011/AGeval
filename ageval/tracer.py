@@ -33,7 +33,7 @@ import threading
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 log = logging.getLogger(__name__)
 

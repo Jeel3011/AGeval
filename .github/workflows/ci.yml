@@ -66,7 +66,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run ruff (lint)
-        run: ruff check . --select E,W,F --ignore E501,W503
+        run: ruff check . --select E,W,F --ignore E501,E402 --per-file-ignores "__init__.py:F401"
 
       - name: Run mypy (type check — main modules)
         run: mypy main.py merger/ eval/ --ignore-missing-imports --no-strict-optional

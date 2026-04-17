@@ -29,7 +29,6 @@ spec = importlib.util.spec_from_file_location(
 def _load_step_create():
     """Load StepCreate from main.py without triggering FastAPI startup side-effects."""
     # We import only what we need via targeted import
-    import sys
     # Temporarily mock supabase and other heavy deps to avoid startup errors
     import unittest.mock as mock
     with mock.patch.dict("sys.modules", {

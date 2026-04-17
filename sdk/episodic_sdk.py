@@ -48,7 +48,8 @@ def _get_api_key() -> str:
 
 def _post(path: str, payload: dict) -> dict:
     """POST to the ingestion API. Raises on HTTP error."""
-    import urllib.request, json
+    import urllib.request
+    import json
 
     url  = f"{_get_api_base()}{path}"
     data = json.dumps(payload).encode()
@@ -71,7 +72,8 @@ def _post(path: str, payload: dict) -> dict:
 
 def _post_batch(path: str, payload: list[dict]) -> dict:
     """POST a list of records to a batch endpoint."""
-    import urllib.request, json
+    import urllib.request
+    import json
 
     url  = f"{_get_api_base()}{path}"
     data = json.dumps(payload).encode()

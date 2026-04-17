@@ -163,7 +163,6 @@ class TestRotateKey:
         mock_get_db.return_value = db
 
         raw_key  = f"ageval-sk-{secrets.token_hex(24)}"
-        old_hash = _hash(raw_key)
         body     = RegisterRequest(label="new")
         rotate_key(body=body, authorization=f"Bearer {raw_key}", user_id="usr_test")
 
