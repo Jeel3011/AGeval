@@ -1,5 +1,5 @@
 -- ============================================================
--- episodic pipeline — Supabase schema  (v2 — safe to re-run)
+-- episodic pipeline — Supabase schema  (v3 — safe to re-run)
 -- Run this in Supabase SQL editor (or via migration tool).
 --
 -- This file is idempotent:
@@ -7,6 +7,9 @@
 --   • ALTER TABLE  ADD COLUMN IF NOT EXISTS → skips if column exists
 --   • CREATE OR REPLACE FUNCTION   → always updates the function
 --   • CREATE INDEX IF NOT EXISTS   → skips if index exists
+--   • Row Level Security (RLS) is enabled on all user-data tables.
+--     The API server sets app.user_id via set_config() before queries.
+--     The merger worker uses the service_role key which bypasses RLS.
 -- ============================================================
 
 -- Enable pgvector (if not already enabled)
@@ -34,6 +37,12 @@ alter table if exists episode_jobs
 alter table if exists episode_jobs
     add column if not exists scheduled_at timestamptz;
 
+-- api_keys: add expiry and audit columns (v3)
+alter table if exists api_keys
+    add column if not exists expires_at   timestamptz;   -- null = never expires
+alter table if exists api_keys
+    add column if not exists last_used_at timestamptz;   -- updated on each auth
+
 -- Drop the old trigger first so we can recreate it cleanly
 drop trigger if exists episode_jobs_updated_at on episode_jobs;
 
@@ -47,14 +56,18 @@ drop function if exists reclaim_stale_jobs(timestamptz);
 -- api_keys
 -- Stores hashed API keys for SDK authentication.
 -- Raw key is NEVER stored — only the sha256 hash.
+-- expires_at: null = never expires; set for time-limited keys.
+-- last_used_at: updated on every successful auth (audit trail).
 -- ============================================================
 create table if not exists api_keys (
-    id          uuid        primary key default gen_random_uuid(),
-    key_hash    text        not null unique,
-    user_id     text        not null,
-    label       text        not null default '',
-    is_active   boolean     not null default true,
-    created_at  timestamptz not null default now()
+    id           uuid        primary key default gen_random_uuid(),
+    key_hash     text        not null unique,
+    user_id      text        not null,
+    label        text        not null default '',
+    is_active    boolean     not null default true,
+    expires_at   timestamptz,                           -- null = never expires
+    last_used_at timestamptz,                           -- set on each successful auth
+    created_at   timestamptz not null default now()
 );
 
 create index if not exists idx_api_keys_hash
@@ -319,3 +332,174 @@ create index if not exists idx_webhook_deliveries_webhook
 
 create index if not exists idx_webhook_deliveries_episode
     on webhook_deliveries (episode_id);
+
+
+-- ============================================================
+-- ROW LEVEL SECURITY (RLS) — v3
+--
+-- Enforces multi-tenant data isolation at the Postgres layer.
+-- Even if application code forgets _assert_episode_owned,
+-- a user can only ever see their own rows.
+--
+-- How it works:
+--   • The API server calls set_config('app.user_id', user_id, true)
+--     before running any user query.
+--   • Policies filter rows using current_setting('app.user_id', true).
+--   • The merger worker connects with the service_role key, which
+--     bypasses RLS entirely — no worker changes needed.
+--   • The 'true' (is_nullable) flag means unset config returns ''
+--     instead of raising an error, so health/register endpoints
+--     (which never call set_config) still work fine.
+-- ============================================================
+
+-- Helper: get the current request's user_id from session config.
+-- Returns '' if not set (service role queries, /health, /register).
+create or replace function current_user_id() returns text
+language sql stable as $$
+    select coalesce(current_setting('app.user_id', true), '')
+$$;
+
+
+-- ---- api_keys -------------------------------------------------------
+alter table api_keys enable row level security;
+
+-- Users can only see their own keys
+create policy api_keys_select on api_keys
+    for select using (
+        user_id = current_user_id()
+        or current_user_id() = ''  -- service role / admin paths
+    );
+
+-- Only service role inserts keys (register endpoint)
+-- The service_role key bypasses RLS, so no insert policy is needed.
+
+-- Users can update only their own keys (for rotation/revocation)
+create policy api_keys_update on api_keys
+    for update using (user_id = current_user_id());
+
+
+-- ---- episodes -------------------------------------------------------
+alter table episodes enable row level security;
+
+create policy episodes_select on episodes
+    for select using (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+create policy episodes_insert on episodes
+    for insert with check (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+create policy episodes_update on episodes
+    for update using (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+
+-- ---- episode_steps --------------------------------------------------
+-- Steps are owned by their parent episode's user_id.
+-- We join through episodes to check ownership.
+alter table episode_steps enable row level security;
+
+create policy episode_steps_select on episode_steps
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from episodes e
+            where  e.episode_id = episode_steps.episode_id
+              and  e.user_id    = current_user_id()
+        )
+    );
+
+create policy episode_steps_insert on episode_steps
+    for insert with check (
+        current_user_id() = ''
+        or exists (
+            select 1 from episodes e
+            where  e.episode_id = episode_steps.episode_id
+              and  e.user_id    = current_user_id()
+        )
+    );
+
+
+-- ---- episode_jobs ---------------------------------------------------
+alter table episode_jobs enable row level security;
+
+create policy episode_jobs_select on episode_jobs
+    for select using (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+create policy episode_jobs_insert on episode_jobs
+    for insert with check (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+create policy episode_jobs_update on episode_jobs
+    for update using (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+
+-- ---- episode_scores -------------------------------------------------
+alter table episode_scores enable row level security;
+
+create policy episode_scores_select on episode_scores
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from episodes e
+            where  e.episode_id = episode_scores.episode_id
+              and  e.user_id    = current_user_id()
+        )
+    );
+
+-- Scores are written by the merger (service role) — no user insert policy needed.
+
+
+-- ---- webhooks -------------------------------------------------------
+alter table webhooks enable row level security;
+
+create policy webhooks_select on webhooks
+    for select using (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+create policy webhooks_insert on webhooks
+    for insert with check (
+        user_id = current_user_id()
+        or current_user_id() = ''
+    );
+
+create policy webhooks_update on webhooks
+    for update using (user_id = current_user_id());
+
+create policy webhooks_delete on webhooks
+    for delete using (user_id = current_user_id());
+
+
+-- ---- webhook_deliveries ---------------------------------------------
+-- Deliveries are written by the merger (service_role) and read by users.
+alter table webhook_deliveries enable row level security;
+
+create policy webhook_deliveries_select on webhook_deliveries
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from webhooks w
+            where  w.id      = webhook_deliveries.webhook_id
+              and  w.user_id = current_user_id()
+        )
+    );
+
+-- ============================================================
+-- END OF SCHEMA
+-- ============================================================

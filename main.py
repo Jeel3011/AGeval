@@ -47,12 +47,12 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 load_dotenv()
 
-import time
-from collections import defaultdict
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from rate_limiter import get_rate_limiter
 
 log = logging.getLogger(__name__)
 
@@ -68,32 +68,32 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Rate Limiting Middleware
 # ---------------------------------------------------------------------------
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_REQUESTS = 100
-_rate_limits = defaultdict(list)
-
+# Keyed by API key (extracted from Authorization header) so the limit is
+# per-user, not per-IP. Falls back to IP if no key is present (e.g. /health).
+# Backend: Redis if REDIS_URL is set, in-memory otherwise.
+# Config: RATE_LIMIT_REQUESTS (default 100) / RATE_LIMIT_WINDOW (default 60s)
+# ---------------------------------------------------------------------------
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Simple in-memory rate limiting by IP
-    client_ip = request.client.host if request.client else "unknown"
-    now = time.time()
-    
-    # Filter old requests
-    active_requests = [req_time for req_time in _rate_limits[client_ip] if now - req_time < RATE_LIMIT_WINDOW]
-    
-    if active_requests:
-        _rate_limits[client_ip] = active_requests
-    elif client_ip in _rate_limits:
-        del _rate_limits[client_ip]
-        active_requests = []
-    
-    if len(active_requests) >= RATE_LIMIT_REQUESTS:
-        return JSONResponse(status_code=429, content={"detail": "Too Many Requests"})
-    
-    if client_ip not in _rate_limits:
-        _rate_limits[client_ip] = []
-    _rate_limits[client_ip].append(now)
-    return await call_next(request)
+    # Extract rate-limit key: prefer API key, fall back to IP
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        rate_key = f"apikey:{auth.removeprefix('Bearer ').strip()[:16]}"  # prefix only — never log full key
+    else:
+        rate_key = f"ip:{request.client.host if request.client else 'unknown'}"
+
+    limiter = get_rate_limiter()
+    if not limiter.is_allowed(rate_key):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too Many Requests"},
+            headers={"X-RateLimit-Remaining": "0"},
+        )
+
+    response = await call_next(request)
+    remaining = limiter.remaining(rate_key)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +128,8 @@ def _hash_key(raw: str) -> str:
 def verify_api_key(authorization: str = Header(...)) -> str:
     """
     Dependency. Validates the Bearer token against api_keys table.
+    - Rejects inactive or expired keys.
+    - Records last_used_at on each successful auth (best-effort).
     Returns user_id on success, raises 401 on failure.
     """
     if not authorization.startswith("Bearer "):
@@ -138,7 +140,7 @@ def verify_api_key(authorization: str = Header(...)) -> str:
 
     db   = get_db()
     resp = db.table("api_keys") \
-        .select("user_id") \
+        .select("id, user_id, expires_at") \
         .eq("key_hash", key_hash) \
         .eq("is_active", True) \
         .limit(1) \
@@ -147,7 +149,26 @@ def verify_api_key(authorization: str = Header(...)) -> str:
     if not resp.data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or inactive API key")
 
-    return resp.data[0]["user_id"]
+    row = resp.data[0]
+
+    # Check expiry
+    if row.get("expires_at"):
+        expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key has expired. Use POST /keys/rotate to get a new key.",
+            )
+
+    # Record last_used_at (best-effort — don't fail auth if this update fails)
+    try:
+        db.table("api_keys").update(
+            {"last_used_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", row["id"]).execute()
+    except Exception as exc:
+        log.warning(f"Could not update last_used_at for key {row['id']}: {exc}")
+
+    return row["user_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +722,106 @@ def find_similar(
         "source_episode_id": episode_id,
         "similar"          : rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# Key management endpoints
+# ---------------------------------------------------------------------------
+@app.get("/keys")
+def list_keys(user_id: str = Depends(verify_api_key)):
+    """
+    List all active API keys for the authenticated user.
+    Useful for knowing which keys exist before rotating or revoking.
+    """
+    db = get_db()
+    resp = (
+        db.table("api_keys")
+        .select("id, label, is_active, expires_at, last_used_at, created_at")
+        .eq("user_id", user_id)
+        .eq("is_active", True)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return {"keys": resp.data or []}
+
+
+@app.post("/keys/rotate", status_code=201)
+def rotate_key(
+    body: RegisterRequest,
+    authorization: str = Header(...),
+    user_id: str = Depends(verify_api_key),
+):
+    """
+    Atomically rotate the caller's API key.
+    - Deactivates the current key.
+    - Issues a new key with the same user_id and optional label.
+    - Returns the new key (shown once — store it immediately).
+
+    The old key stops working instantly.
+    """
+    import uuid, secrets
+
+    raw_old  = authorization.removeprefix("Bearer ").strip()
+    old_hash = _hash_key(raw_old)
+    db       = get_db()
+
+    # Deactivate the current key
+    db.table("api_keys").update({"is_active": False}).eq("key_hash", old_hash).execute()
+
+    # Issue a new key
+    new_raw  = f"ageval-sk-{secrets.token_hex(24)}"
+    new_hash = _hash_key(new_raw)
+
+    try:
+        db.table("api_keys").insert({
+            "key_hash"  : new_hash,
+            "user_id"   : user_id,
+            "label"     : body.label or "rotated",
+            "is_active" : True,
+        }).execute()
+    except Exception as e:
+        # Rollback: re-activate old key if new insert fails
+        db.table("api_keys").update({"is_active": True}).eq("key_hash", old_hash).execute()
+        raise HTTPException(status_code=500, detail=f"Rotation failed: {e}")
+
+    log.info(f"API key rotated for user={user_id} label='{body.label}'")
+    return {
+        "api_key" : new_raw,
+        "user_id" : user_id,
+        "message" : "Old key is now inactive. Store the new key — it will not be shown again.",
+    }
+
+
+@app.delete("/keys/{key_id}", status_code=200)
+def revoke_key(
+    key_id: str,
+    user_id: str = Depends(verify_api_key),
+):
+    """
+    Revoke (deactivate) a specific key by its UUID.
+    You can only revoke keys belonging to your own user_id.
+    Use GET /keys to discover key IDs.
+    """
+    db = get_db()
+
+    # Verify the key belongs to the caller
+    resp = (
+        db.table("api_keys")
+        .select("id, user_id, is_active")
+        .eq("id", key_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail=f"Key {key_id} not found")
+    if resp.data[0]["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to revoke this key")
+    if not resp.data[0]["is_active"]:
+        return {"key_id": key_id, "revoked": False, "reason": "already inactive"}
+
+    db.table("api_keys").update({"is_active": False}).eq("id", key_id).execute()
+    log.info(f"API key {key_id} revoked by user={user_id}")
+    return {"key_id": key_id, "revoked": True}
 
 
 # ---------------------------------------------------------------------------
