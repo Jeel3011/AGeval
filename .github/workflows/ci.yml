@@ -38,8 +38,16 @@ jobs:
           pip install -e . --quiet
           python -c "import ageval; print(f'ageval {ageval.__version__} imports OK')"
 
+      - name: Guard against tracked secrets
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked in git — this leaks secrets!"
+            exit 1
+          fi
+          echo ".env is not tracked ✓"
+
   lint:
-    name: Lint
+    name: Lint & Type Check
     runs-on: ubuntu-latest
 
     steps:
@@ -51,9 +59,15 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install lint + type-check tools
+        run: |
+          pip install --upgrade pip
+          pip install ruff mypy
+          pip install -r requirements.txt
 
-      - name: Run ruff
+      - name: Run ruff (lint)
         run: ruff check . --select E,W,F --ignore E501,W503
-        continue-on-error: true   # lint warnings don't block CI for now
+
+      - name: Run mypy (type check — main modules)
+        run: mypy main.py merger/ eval/ --ignore-missing-imports --no-strict-optional
+        continue-on-error: true   # type errors are warnings for now, not blockers

@@ -39,6 +39,7 @@ import hashlib
 import ipaddress
 import logging
 import os
+import re
 import socket
 from datetime import datetime, timezone
 from typing import Any
@@ -50,20 +51,67 @@ load_dotenv()
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from rate_limiter import get_rate_limiter
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Structured logging — JSON in production, human-readable in dev
+# ---------------------------------------------------------------------------
+_log_format = os.environ.get("LOG_FORMAT", "text").lower()
+if _log_format == "json":
+    import json as _json
+
+    class _JSONFormatter(logging.Formatter):
+        def format(self, record):
+            return _json.dumps({
+                "ts"     : self.formatTime(record, self.datefmt),
+                "level"  : record.levelname,
+                "logger" : record.name,
+                "msg"    : record.getMessage(),
+                "module" : record.module,
+                "line"   : record.lineno,
+            })
+
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_JSONFormatter())
+    logging.root.handlers = [_handler]
+    logging.root.setLevel(logging.INFO)
+else:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+
 app = FastAPI(title="ageval ingestion API", version="0.2.0")
+
+_cors_origins = os.environ.get("AGEVAL_CORS_ORIGINS", "").strip()
+if not _cors_origins:
+    log.warning(
+        "AGEVAL_CORS_ORIGINS not set — defaulting to '*' (allow all origins). "
+        "Set AGEVAL_CORS_ORIGINS to restrict in production."
+    )
+    _cors_origins = "*"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("AGEVAL_CORS_ORIGINS", "*").split(","),
-    allow_methods=["POST", "GET"],
+    allow_origins=_cors_origins.split(","),
+    allow_methods=["POST", "GET", "DELETE"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Lightweight metrics — in-process counters
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+_metrics = {"requests_total": 0, "requests_rate_limited": 0, "errors_total": 0}
+_metrics_lock = _threading.Lock()
+
+
+def _inc_metric(name: str) -> None:
+    with _metrics_lock:
+        _metrics[name] = _metrics.get(name, 0) + 1
+
 
 # ---------------------------------------------------------------------------
 # Rate Limiting Middleware
@@ -75,6 +123,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
+    _inc_metric("requests_total")
+
     # Extract rate-limit key: prefer API key, fall back to IP
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -84,6 +134,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
     limiter = get_rate_limiter()
     if not limiter.is_allowed(rate_key):
+        _inc_metric("requests_rate_limited")
         return JSONResponse(
             status_code=429,
             content={"detail": "Too Many Requests"},
@@ -93,6 +144,8 @@ async def rate_limit_middleware(request: Request, call_next):
     response = await call_next(request)
     remaining = limiter.remaining(rate_key)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
+    if response.status_code >= 500:
+        _inc_metric("errors_total")
     return response
 
 
@@ -174,10 +227,32 @@ def verify_api_key(authorization: str = Header(...)) -> str:
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
+_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]{1,128}$')
+
+
+def _validate_id(value: str, field_name: str) -> str:
+    """Validate that an ID field matches the allowed pattern."""
+    if not _ID_PATTERN.match(value):
+        raise ValueError(
+            f"{field_name} must be 1-128 alphanumeric characters, hyphens, underscores, or dots"
+        )
+    return value
+
+
 class EpisodeCreate(BaseModel):
     episode_id: str
     agent_id  : str
     task      : str | None = None
+
+    @field_validator('episode_id')
+    @classmethod
+    def check_episode_id(cls, v: str) -> str:
+        return _validate_id(v, 'episode_id')
+
+    @field_validator('agent_id')
+    @classmethod
+    def check_agent_id(cls, v: str) -> str:
+        return _validate_id(v, 'agent_id')
 
 
 def _generate_embedding(text: str) -> list[float] | None:
@@ -210,12 +285,27 @@ class StepCreate(BaseModel):
     reasoning      : str | None = None
     latency_ms     : int | None = None
 
+    @field_validator('episode_id')
+    @classmethod
+    def check_episode_id(cls, v: str) -> str:
+        return _validate_id(v, 'episode_id')
+
 
 class JobCreate(BaseModel):
     episode_id: str
     run_id    : str          # LangSmith run ID — pass "none" if not using LangSmith
     agent_id  : str
     task      : str | None = None
+
+    @field_validator('episode_id')
+    @classmethod
+    def check_episode_id(cls, v: str) -> str:
+        return _validate_id(v, 'episode_id')
+
+    @field_validator('agent_id')
+    @classmethod
+    def check_agent_id(cls, v: str) -> str:
+        return _validate_id(v, 'agent_id')
 
 
 class RegisterRequest(BaseModel):
@@ -274,6 +364,23 @@ def _validate_webhook_url(url: str) -> None:
 @app.get("/health")
 def health():
     return {"status": "ok", "version": "0.2.0"}
+
+
+@app.get("/metrics")
+def metrics():
+    """
+    Basic operational metrics for monitoring.
+    Returns request counts and rate limiter stats.
+    No authentication required (standard for metrics endpoints).
+    """
+    limiter = get_rate_limiter()
+    with _metrics_lock:
+        return {
+            "requests_total"       : _metrics["requests_total"],
+            "requests_rate_limited": _metrics["requests_rate_limited"],
+            "errors_total"         : _metrics["errors_total"],
+            "rate_limiter_backend" : type(limiter).__name__,
+        }
 
 
 ADMIN_SECRET = os.environ.get("AGEVAL_ADMIN_SECRET")  # NO default — must be explicitly set
@@ -455,6 +562,47 @@ def create_webhook(
     return {"ok": True, "url": body.url}
 
 
+@app.get("/webhooks/deliveries")
+def list_webhook_deliveries(
+    limit  : int = Query(50, ge=1, le=200, description="Max deliveries to return"),
+    offset : int = Query(0, ge=0),
+    user_id: str = Depends(verify_api_key),
+):
+    """
+    List webhook delivery attempts for the authenticated user.
+    Shows delivery status, attempt count, and errors for debugging.
+    Scoped to the user's own webhooks only.
+    """
+    db = get_db()
+
+    # Get user's webhook IDs first
+    hooks_resp = (
+        db.table("webhooks")
+        .select("id")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    if not hooks_resp.data:
+        return {"deliveries": [], "count": 0}
+
+    hook_ids = [h["id"] for h in hooks_resp.data]
+
+    # Fetch deliveries for those webhooks
+    deliveries_resp = (
+        db.table("webhook_deliveries")
+        .select("id, webhook_id, episode_id, status, attempts, last_error, created_at")
+        .in_("webhook_id", hook_ids)
+        .order("created_at", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+
+    return {
+        "deliveries": deliveries_resp.data or [],
+        "count": len(deliveries_resp.data or []),
+    }
+
+
 @app.post("/jobs", status_code=201)
 def create_job(
     body   : JobCreate,
@@ -557,11 +705,14 @@ def get_episode(
         .execute()
     )
 
-    return {
-        "episode": ep_resp.data[0],
-        "steps"  : steps_resp.data or [],
-        "scores" : score_resp.data or [],
-    }
+    return JSONResponse(
+        content={
+            "episode": ep_resp.data[0],
+            "steps"  : steps_resp.data or [],
+            "scores" : score_resp.data or [],
+        },
+        headers={"Cache-Control": "private, max-age=15"},
+    )
 
 
 @app.get("/episodes/{episode_id}/steps")
@@ -753,11 +904,11 @@ def rotate_key(
 ):
     """
     Atomically rotate the caller's API key.
-    - Deactivates the current key.
-    - Issues a new key with the same user_id and optional label.
+    - Issues a new key first (so the user always has ≥1 valid key).
+    - Then deactivates the old key.
     - Returns the new key (shown once — store it immediately).
 
-    The old key stops working instantly.
+    The old key stops working after this call returns.
     """
     import uuid, secrets
 
@@ -765,10 +916,7 @@ def rotate_key(
     old_hash = _hash_key(raw_old)
     db       = get_db()
 
-    # Deactivate the current key
-    db.table("api_keys").update({"is_active": False}).eq("key_hash", old_hash).execute()
-
-    # Issue a new key
+    # Issue the new key FIRST — user always has at least one working key
     new_raw  = f"ageval-sk-{secrets.token_hex(24)}"
     new_hash = _hash_key(new_raw)
 
@@ -780,9 +928,15 @@ def rotate_key(
             "is_active" : True,
         }).execute()
     except Exception as e:
-        # Rollback: re-activate old key if new insert fails
-        db.table("api_keys").update({"is_active": True}).eq("key_hash", old_hash).execute()
+        # New key insert failed — old key is still active, no harm done
         raise HTTPException(status_code=500, detail=f"Rotation failed: {e}")
+
+    # Now deactivate the old key (new key is already active as fallback)
+    try:
+        db.table("api_keys").update({"is_active": False}).eq("key_hash", old_hash).execute()
+    except Exception as e:
+        # Non-fatal: old key stays active alongside new key (user has 2 keys)
+        log.warning(f"Old key deactivation failed during rotation for user={user_id}: {e}")
 
     log.info(f"API key rotated for user={user_id} label='{body.label}'")
     return {

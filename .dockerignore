@@ -1,0 +1,40 @@
+# Secrets — NEVER copy into images
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+
+# Python environments & caches
+.venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+build/
+dist/
+wheels/
+.pytest_cache/
+
+# Editor/IDE
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Dev-only files
+e2e_test.py
+example_agent.py
+brainstorming.md
+PRODUCTIOn.md
+PRODUCTION.md
+
+# Dashboard (served separately, not needed in API/worker images)
+# Uncomment if you serve dashboard from a separate static host:
+# dashboard/
+
+# Old duplicate package
+ageval_package/

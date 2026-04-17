@@ -364,6 +364,7 @@ $$;
 alter table api_keys enable row level security;
 
 -- Users can only see their own keys
+drop policy if exists api_keys_select on api_keys;
 create policy api_keys_select on api_keys
     for select using (
         user_id = current_user_id()
@@ -374,6 +375,7 @@ create policy api_keys_select on api_keys
 -- The service_role key bypasses RLS, so no insert policy is needed.
 
 -- Users can update only their own keys (for rotation/revocation)
+drop policy if exists api_keys_update on api_keys;
 create policy api_keys_update on api_keys
     for update using (user_id = current_user_id());
 
@@ -381,22 +383,31 @@ create policy api_keys_update on api_keys
 -- ---- episodes -------------------------------------------------------
 alter table episodes enable row level security;
 
+drop policy if exists episodes_select on episodes;
 create policy episodes_select on episodes
     for select using (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists episodes_insert on episodes;
 create policy episodes_insert on episodes
     for insert with check (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists episodes_update on episodes;
 create policy episodes_update on episodes
     for update using (
         user_id = current_user_id()
         or current_user_id() = ''
+    );
+
+drop policy if exists episodes_delete on episodes;
+create policy episodes_delete on episodes
+    for delete using (
+        user_id = current_user_id()
     );
 
 
@@ -405,6 +416,7 @@ create policy episodes_update on episodes
 -- We join through episodes to check ownership.
 alter table episode_steps enable row level security;
 
+drop policy if exists episode_steps_select on episode_steps;
 create policy episode_steps_select on episode_steps
     for select using (
         current_user_id() = ''
@@ -415,8 +427,20 @@ create policy episode_steps_select on episode_steps
         )
     );
 
+drop policy if exists episode_steps_insert on episode_steps;
 create policy episode_steps_insert on episode_steps
     for insert with check (
+        current_user_id() = ''
+        or exists (
+            select 1 from episodes e
+            where  e.episode_id = episode_steps.episode_id
+              and  e.user_id    = current_user_id()
+        )
+    );
+
+drop policy if exists episode_steps_delete on episode_steps;
+create policy episode_steps_delete on episode_steps
+    for delete using (
         current_user_id() = ''
         or exists (
             select 1 from episodes e
@@ -429,28 +453,38 @@ create policy episode_steps_insert on episode_steps
 -- ---- episode_jobs ---------------------------------------------------
 alter table episode_jobs enable row level security;
 
+drop policy if exists episode_jobs_select on episode_jobs;
 create policy episode_jobs_select on episode_jobs
     for select using (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists episode_jobs_insert on episode_jobs;
 create policy episode_jobs_insert on episode_jobs
     for insert with check (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists episode_jobs_update on episode_jobs;
 create policy episode_jobs_update on episode_jobs
     for update using (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists episode_jobs_delete on episode_jobs;
+create policy episode_jobs_delete on episode_jobs
+    for delete using (
+        user_id = current_user_id()
+    );
+
 
 -- ---- episode_scores -------------------------------------------------
 alter table episode_scores enable row level security;
 
+drop policy if exists episode_scores_select on episode_scores;
 create policy episode_scores_select on episode_scores
     for select using (
         current_user_id() = ''
@@ -467,21 +501,25 @@ create policy episode_scores_select on episode_scores
 -- ---- webhooks -------------------------------------------------------
 alter table webhooks enable row level security;
 
+drop policy if exists webhooks_select on webhooks;
 create policy webhooks_select on webhooks
     for select using (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists webhooks_insert on webhooks;
 create policy webhooks_insert on webhooks
     for insert with check (
         user_id = current_user_id()
         or current_user_id() = ''
     );
 
+drop policy if exists webhooks_update on webhooks;
 create policy webhooks_update on webhooks
     for update using (user_id = current_user_id());
 
+drop policy if exists webhooks_delete on webhooks;
 create policy webhooks_delete on webhooks
     for delete using (user_id = current_user_id());
 
@@ -490,6 +528,7 @@ create policy webhooks_delete on webhooks
 -- Deliveries are written by the merger (service_role) and read by users.
 alter table webhook_deliveries enable row level security;
 
+drop policy if exists webhook_deliveries_select on webhook_deliveries;
 create policy webhook_deliveries_select on webhook_deliveries
     for select using (
         current_user_id() = ''

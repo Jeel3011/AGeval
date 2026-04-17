@@ -138,11 +138,45 @@ def _deliver_webhooks(client, episode_id: str, score_val: float):
     Deliver webhooks for a scored episode with retry and audit trail.
     Writes to webhook_deliveries table (if it exists) for tracking.
     Falls back to best-effort delivery if table doesn't exist.
+
+    SSRF protection: re-resolves DNS and validates against private IP ranges
+    at delivery time (not just registration) to prevent DNS rebinding attacks.
     """
     import urllib.request
     import json
     import hmac
     import hashlib
+    import socket
+    import ipaddress
+
+    # Private/internal IP ranges — SSRF blocklist
+    _PRIVATE_RANGES = [
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("169.254.0.0/16"),
+        ipaddress.ip_network("::1/128"),
+        ipaddress.ip_network("fc00::/7"),
+    ]
+
+    def _is_safe_url(url: str) -> bool:
+        """Re-resolve DNS at delivery time and check against private IP ranges."""
+        try:
+            from urllib.parse import urlparse
+            hostname = urlparse(url).hostname
+            if not hostname:
+                return False
+            addr_str = socket.gethostbyname(hostname)
+            addr = ipaddress.ip_address(addr_str)
+            for network in _PRIVATE_RANGES:
+                if addr in network:
+                    log.warning(f"Webhook URL {url} resolves to private IP {addr_str} — blocked (SSRF)")
+                    return False
+            return True
+        except Exception as exc:
+            log.warning(f"Webhook URL DNS resolution failed for {url}: {exc} — blocked")
+            return False
 
     try:
         ep_resp = client.table("episodes").select("user_id").eq("episode_id", episode_id).execute()
@@ -171,6 +205,21 @@ def _deliver_webhooks(client, episode_id: str, score_val: float):
 
             url = hook["url"]
             hook_id = hook.get("id", "unknown")
+
+            # SSRF check: re-validate DNS at delivery time (prevents DNS rebinding)
+            if not _is_safe_url(url):
+                try:
+                    client.table("webhook_deliveries").insert({
+                        "webhook_id" : hook_id,
+                        "episode_id" : episode_id,
+                        "status"     : "failed",
+                        "attempts"   : 0,
+                        "last_error" : "SSRF blocked: URL resolves to private/internal IP at delivery time",
+                        "created_at" : datetime.now(timezone.utc).isoformat(),
+                    }).execute()
+                except Exception:
+                    pass
+                continue
 
             # Build HMAC signature for receiver verification
             sig = hmac.new(

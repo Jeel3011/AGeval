@@ -172,15 +172,15 @@ class TestRotateKey:
 
     @patch("main.get_db")
     def test_rotate_rollback_on_insert_failure(self, mock_get_db):
+        """
+        When insert of the new key fails, the old key should remain active
+        (no deactivation happened yet — insert-first pattern).
+        """
         from fastapi import HTTPException
         from main import rotate_key, RegisterRequest
 
         db = MagicMock()
-        # First update (deactivate) succeeds
-        deactivate_chain = MagicMock()
-        db.table.return_value.update.return_value.eq.return_value = deactivate_chain
-        deactivate_chain.execute.return_value = MagicMock()
-        # Insert fails
+        # Insert fails immediately — old key was never deactivated
         db.table.return_value.insert.return_value.execute.side_effect = Exception("DB error")
         mock_get_db.return_value = db
 
@@ -189,8 +189,8 @@ class TestRotateKey:
         with pytest.raises(HTTPException) as exc_info:
             rotate_key(body=body, authorization=f"Bearer {raw_key}", user_id="usr_test")
         assert exc_info.value.status_code == 500
-        # Rollback: re-activate old key
-        db.table.return_value.update.assert_called()
+        # Old key was NEVER deactivated — no update call should have happened
+        db.table.return_value.update.assert_not_called()
 
 
 # ---- revoke_key tests ------------------------------------------------

@@ -70,17 +70,39 @@ def _classify_error(exc: Exception) -> tuple[str, bool]:
 
 
 def _extract_reasoning(text: str | None) -> str | None:
-    if not text:
+    """
+    Extract reasoning/chain-of-thought from LLM output.
+    Supports 3 formats (synced with sdk/episodic_sdk.py ReasoningExtractor):
+      1. XML tags: <reasoning>...</reasoning> or <thinking>...</thinking>
+      2. ReAct: Thought: / Reasoning: / Think:
+      3. OpenAI: content before a tool-call block
+    """
+    if not text or not text.strip():
         return None
-    m = re.search(r"<reasoning[^>]*>(.*?)</reasoning>", text, re.DOTALL | re.IGNORECASE)
+    # 1. XML/tag format (<reasoning> or <thinking>)
+    m = re.search(
+        r"<(?:reasoning|thinking)[^>]*>(.*?)</(?:reasoning|thinking)>",
+        text, re.DOTALL | re.IGNORECASE,
+    )
     if m:
-        return m.group(1).strip()
+        return m.group(1).strip() or None
+    # 2. ReAct format (Thought: / Think: / Reasoning:)
     m = re.search(
         r"^(?:thought|reasoning|think)[:\s]+(.+?)(?=\n(?:action|tool|observation)|$)",
         text, re.DOTALL | re.IGNORECASE | re.MULTILINE,
     )
     if m:
-        return m.group(1).strip()
+        extracted = m.group(1).strip()
+        return extracted or None
+    # 3. OpenAI content before tool call block
+    m = re.search(
+        r'^(.+?)(?=\n(?:```|\{\s*\"type\"\s*:|function_call|tool_call))',
+        text, re.DOTALL,
+    )
+    if m:
+        candidate = m.group(1).strip()
+        if len(candidate) > 20 and not candidate.startswith("{"):
+            return candidate
     return None
 
 

@@ -100,13 +100,29 @@ class InMemoryRateLimiter:
     """
     Simple fixed-window rate limiter using a Python dict.
     Not shared across processes. Use only as a fallback.
+
+    Memory safety: empty keys are evicted after pruning; a full sweep
+    runs every _SWEEP_INTERVAL calls to clean up idle keys.
     """
+
+    _SWEEP_INTERVAL = 1000  # full eviction sweep every N calls
 
     def __init__(self, requests: int, window: int):
         self.requests = requests
         self.window   = window
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock    = Lock()
+        self._call_count = 0
+
+    def _maybe_sweep(self, now: float) -> None:
+        """Evict all keys with no timestamps in the current window (called under lock)."""
+        self._call_count += 1
+        if self._call_count % self._SWEEP_INTERVAL != 0:
+            return
+        cutoff = now - self.window
+        dead_keys = [k for k, v in self._buckets.items() if not v or v[-1] <= cutoff]
+        for k in dead_keys:
+            del self._buckets[k]
 
     def is_allowed(self, key: str) -> bool:
         now = time.time()
@@ -115,11 +131,15 @@ class InMemoryRateLimiter:
             # Purge stale timestamps
             cutoff    = now - self.window
             ts_list   = [t for t in ts_list if t > cutoff]
+            if not ts_list:
+                # Key had no recent activity — evict to save memory
+                del self._buckets[key]
             if len(ts_list) >= self.requests:
                 self._buckets[key] = ts_list
                 return False
             ts_list.append(now)
             self._buckets[key] = ts_list
+            self._maybe_sweep(now)
             return True
 
     def remaining(self, key: str) -> int:
