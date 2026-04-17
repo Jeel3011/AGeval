@@ -35,7 +35,6 @@ jobs:
 
       - name: Verify package import
         run: |
-          cd ageval
           pip install -e . --quiet
           python -c "import ageval; print(f'ageval {ageval.__version__} imports OK')"
 
