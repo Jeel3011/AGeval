@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from ageval.session import AgentSession, _api_configured, _safe_serialize
 

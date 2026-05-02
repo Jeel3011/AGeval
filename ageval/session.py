@@ -48,7 +48,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -364,7 +364,6 @@ class AgentSession:
         reasoning: str | None = None,
     ) -> Callable:
         """Async version of traced(). Wraps an async callable."""
-        import asyncio
         import functools
 
         name = tool_name or getattr(fn, "__name__", "unknown_tool")

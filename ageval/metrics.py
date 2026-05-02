@@ -211,7 +211,7 @@ def score_with_custom_metrics(
 
     if not active_metrics:
         raise ValueError(
-            f"No registered metrics found. Register metrics with @register_metric."
+            "No registered metrics found. Register metrics with @register_metric."
         )
 
     # Run each metric
