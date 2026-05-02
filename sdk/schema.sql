@@ -37,11 +37,16 @@ alter table if exists episode_jobs
 alter table if exists episode_jobs
     add column if not exists scheduled_at timestamptz;
 
--- api_keys: add expiry and audit columns (v3)
+-- api_keys: add expires_at and last_used_at columns
 alter table if exists api_keys
     add column if not exists expires_at   timestamptz;   -- null = never expires
 alter table if exists api_keys
     add column if not exists last_used_at timestamptz;   -- updated on each auth
+
+-- episodes: add cluster_id for task clustering
+alter table if exists episodes
+    add column if not exists cluster_id uuid; -- foreign key added later
+
 
 -- Drop the old trigger first so we can recreate it cleanly
 drop trigger if exists episode_jobs_updated_at on episode_jobs;
@@ -139,6 +144,28 @@ create index if not exists idx_episodes_agent
 
 create index if not exists idx_episodes_user
     on episodes (user_id, created_at desc);
+
+-- ============================================================
+-- episode_clusters
+-- Stores K-means centroids for task clustering
+-- ============================================================
+create table if not exists episode_clusters (
+    id            uuid primary key default gen_random_uuid(),
+    user_id       text not null,
+    agent_id      text not null,
+    label         text not null,
+    centroid      vector(1536),
+    episode_count int default 0,
+    avg_score     numeric,
+    drift         numeric,
+    top_failing_tool text,
+    created_at    timestamptz default now()
+);
+
+-- Note: Cannot easily 'add foreign key if not exists' in raw postgres 
+-- without a DO block, so we rely on application logic or just adding the column.
+-- We added the column in the MIGRATION block above.
+
 
 
 -- ============================================================

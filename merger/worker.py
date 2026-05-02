@@ -42,6 +42,7 @@ load_dotenv()
 from supabase import create_client
 from merger.merger import run_merger
 from eval.rules import score_episode
+from merger.cluster import run_clustering
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +55,7 @@ MAX_RETRIES          = 3
 NOT_READY_BACKOFF    = 30   # seconds for first not-ready requeue (doubles each time)
 STALE_JOB_MINUTES   = 10   # minutes before a processing job is considered dead
 RECLAIM_EVERY_N     = 6    # reclaim stale jobs every N poll cycles (~30s)
+CLUSTER_EVERY_N     = 60   # run clustering every N poll cycles (~5m)
 
 
 def get_client():
@@ -353,6 +355,10 @@ def run():
         # Periodically reclaim stale jobs from dead workers
         if poll_cycle % RECLAIM_EVERY_N == 0:
             reclaim_stale_jobs(client)
+
+        # Periodically run clustering
+        if poll_cycle % CLUSTER_EVERY_N == 0:
+            run_clustering(client)
 
         job = pick_job(client)
 

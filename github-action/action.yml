@@ -1,0 +1,76 @@
+name: 'AGeval Guardrail'
+description: 'Fails the CI build if agent behavioral drift degrades beyond a threshold.'
+inputs:
+  ageval_api_key:
+    description: 'API Key for AGeval'
+    required: true
+  agent_id:
+    description: 'Agent ID to check for drift'
+    required: true
+  max_drift_pct:
+    description: 'Maximum allowable negative drift percentage (e.g., -5 for -5%)'
+    required: false
+    default: '-5'
+  ageval_api_url:
+    description: 'Base URL for AGeval (defaults to production)'
+    required: false
+    default: 'https://ageval-production.up.railway.app'
+runs:
+  using: 'composite'
+  steps:
+    - name: Check Drift
+      shell: bash
+      env:
+        AGEVAL_API_KEY: ${{ inputs.ageval_api_key }}
+        AGEVAL_API_URL: ${{ inputs.ageval_api_url }}
+        AGENT_ID: ${{ inputs.agent_id }}
+        MAX_DRIFT: ${{ inputs.max_drift_pct }}
+      run: |
+        echo "Fetching task clusters and behavioral drift for agent: $AGENT_ID..."
+        HTTP_STATUS=$(curl -s -o ageval_resp.json -w "%{http_code}" "$AGEVAL_API_URL/clusters?agent_id=$AGENT_ID" -H "Authorization: Bearer $AGEVAL_API_KEY")
+        
+        if [ "$HTTP_STATUS" -ne 200 ]; then
+          echo "::error::Failed to fetch AGeval data (HTTP $HTTP_STATUS)"
+          cat ageval_resp.json
+          exit 1
+        fi
+        
+        # Use Python to parse the JSON and check drift thresholds
+        python3 -c '
+        import json, sys, os
+        try:
+            with open("ageval_resp.json") as f:
+                data = json.load(f)
+                
+            clusters = data.get("clusters", [])
+            if not clusters:
+                print("No clusters found for this agent. Skipping drift check.")
+                sys.exit(0)
+                
+            max_drift = float(os.environ["MAX_DRIFT"])
+            failed = False
+            
+            for c in clusters:
+                label = c.get("label", "Unknown Task")
+                drift = c.get("drift")
+                
+                if drift is not None:
+                    drift_pct = drift * 100
+                    if drift_pct < max_drift:
+                        print(f"::error::Cluster \"{label}\" degraded by {drift_pct:.1f}% (threshold: {max_drift}%). Top failing tool: {c.get(\"top_failing_tool\", \"None\")}")
+                        failed = True
+                    else:
+                        trend = "▲" if drift_pct >= 0 else "▼"
+                        print(f"✅ Cluster \"{label}\" drift: {trend} {abs(drift_pct):.1f}%")
+                else:
+                    print(f"ℹ️ Cluster \"{label}\" does not have enough historical data for drift calculation yet.")
+                    
+            if failed:
+                print("::error::Behavioral drift threshold exceeded. CI failed.")
+                sys.exit(1)
+                
+            print("All clusters pass behavioral drift requirements.")
+        except Exception as e:
+            print(f"::error::Failed to parse response: {e}")
+            sys.exit(1)
+        '

@@ -158,32 +158,51 @@ class ReasoningExtractor:
         r"^(?:thought|reasoning|think)[:\s]+(.+?)(?=\n(?:action|tool|observation)|$)",
         re.DOTALL | re.IGNORECASE | re.MULTILINE,
     )
-    # OpenAI function-call style: content before the first tool_call
-    _OPENAI_RE = re.compile(
-        r"^(.+?)(?=\n(?:```|\{\s*\"type\"\s*:|function_call|tool_call))",
-        re.DOTALL,
-    )
+
 
     @classmethod
-    def extract(cls, llm_output: Optional[str]) -> Optional[str]:
-        if not llm_output or not llm_output.strip():
+    def extract(cls, llm_output: Any) -> Optional[str]:
+        if not llm_output:
             return None
+
+        extracted_text = ""
+        if isinstance(llm_output, list):
+            texts = []
+            for blk in llm_output:
+                if isinstance(blk, dict):
+                    if blk.get("type") == "text":
+                        texts.append(blk.get("text", ""))
+                    elif blk.get("type") == "thinking":
+                        texts.append(blk.get("thinking", ""))
+                elif isinstance(blk, str):
+                    texts.append(blk)
+            extracted_text = "\n".join(texts)
+        elif isinstance(llm_output, str):
+            extracted_text = llm_output
+        else:
+            try:
+                if hasattr(llm_output, "content"):
+                    return cls.extract(llm_output.content)
+            except Exception:
+                pass
+            extracted_text = str(llm_output)
+
+        if not extracted_text or not extracted_text.strip():
+            return None
+
         # 1. XML/tag format (<reasoning> or <thinking>)
-        m = cls._TAG_RE.search(llm_output)
+        m = cls._TAG_RE.search(extracted_text)
         if m:
             return m.group(1).strip() or None
         # 2. ReACT format (Thought: / Think:)
-        m = cls._REACT_RE.search(llm_output)
+        m = cls._REACT_RE.search(extracted_text)
         if m:
             extracted = m.group(1).strip()
             return extracted or None
-        # 3. OpenAI content before tool call block
-        m = cls._OPENAI_RE.search(llm_output)
-        if m:
-            text = m.group(1).strip()
-            # Only use if it looks like a reasoning sentence (>20 chars, no JSON)
-            if len(text) > 20 and not text.startswith("{"):
-                return text
+        # 3. Native structured outputs (OpenAI content / Anthropic text blocks)
+        candidate = extracted_text.strip()
+        if len(candidate) > 10 and not candidate.startswith(("{", "[")):
+            return candidate
         return None
 
 

@@ -189,26 +189,89 @@ Score the agent on these four dimensions. Be strict and honest.
 # LLM call
 # ---------------------------------------------------------------------------
 def _call_llm(prompt: str, model: str) -> str:
+    if model.startswith("claude"):
+        return _call_anthropic(prompt, model)
+    elif model.startswith("ollama/"):
+        return _call_ollama(prompt, model.replace("ollama/", ""))
+    else:
+        return _call_openai(prompt, model)
+
+def _call_openai(prompt: str, model: str) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY not set. The LLM judge requires OpenAI access. "
-            "Use eval.rules.score_episode for rule-based scoring instead."
-        )
+        raise RuntimeError("OPENAI_API_KEY not set for OpenAI judge.")
 
+    import urllib.request
+    import urllib.error
+    url = "https://api.openai.com/v1/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 512,
+        "response_format": {"type": "json_object"}
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }, method="POST")
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        resp   = client.chat.completions.create(
-            model       = model,
-            messages    = [{"role": "user", "content": prompt}],
-            temperature = 0.0,      # deterministic — we want consistent scores
-            max_tokens  = 512,
-            response_format={"type": "json_object"},
-        )
-        return resp.choices[0].message.content or ""
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read())
+            return body["choices"][0]["message"]["content"] or ""
     except Exception as exc:
-        raise RuntimeError(f"LLM judge call failed: {exc}") from exc
+        raise RuntimeError(f"OpenAI judge call failed: {exc}") from exc
+
+def _call_anthropic(prompt: str, model: str) -> str:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set for Anthropic judge.")
+
+    import urllib.request
+    import urllib.error
+    url = "https://api.anthropic.com/v1/messages"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 512,
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01"
+    }, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read())
+            return body["content"][0]["text"]
+    except Exception as exc:
+        raise RuntimeError(f"Anthropic judge call failed: {exc}") from exc
+
+def _call_ollama(prompt: str, model: str) -> str:
+    base_url = os.environ.get("OLLAMA_API_URL", "http://localhost:11434").rstrip("/")
+    url = f"{base_url}/api/generate"
+    import urllib.request
+    import urllib.error
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.0}
+    }
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={
+        "Content-Type": "application/json"
+    }, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.loads(resp.read())
+            return body.get("response", "")
+    except Exception as exc:
+        raise RuntimeError(f"Ollama judge call failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

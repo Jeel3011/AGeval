@@ -657,6 +657,23 @@ def create_job(
 # ---------------------------------------------------------------------------
 # Endpoints — query
 # ---------------------------------------------------------------------------
+@app.get("/clusters")
+def list_clusters(
+    agent_id: str | None = Query(None, description="Filter by agent_id"),
+    user_id : str        = Depends(verify_api_key),
+):
+    """
+    List task clusters for the authenticated user.
+    Optionally filter by agent_id.
+    """
+    db = get_db()
+    query = db.table("episode_clusters").select("*").eq("user_id", user_id)
+    if agent_id:
+        query = query.eq("agent_id", agent_id)
+        
+    resp = query.order("episode_count", desc=True).execute()
+    return {"clusters": resp.data or [], "count": len(resp.data or [])}
+
 @app.get("/episodes")
 def list_episodes(
     agent_id: str | None = Query(None, description="Filter by agent_id"),

@@ -24,12 +24,12 @@ One line of code → every tool call traced, every run scored, every episode sea
 ## Install
 
 ```bash
-pip install ageval
+pip install ageval-sdk
 
 # With framework-specific extras:
-pip install ageval[openai]      # For OpenAI function-calling agents
-pip install ageval[langchain]   # For LangGraph / LangChain agents
-pip install ageval[all]         # Everything
+pip install ageval-sdk[openai]      # For OpenAI function-calling agents
+pip install ageval-sdk[langchain]   # For LangGraph / LangChain agents
+pip install ageval-sdk[all]         # Everything
 ```
 
 ---

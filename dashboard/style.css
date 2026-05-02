@@ -425,6 +425,36 @@ tr:hover td { background: var(--bg-hover); cursor: pointer; }
 
 .font-mono { font-family: var(--mono); font-size: 13px; letter-spacing: -0.02em; }
 
+/* ── Row Actions ───────────────────────────────────────────── */
+.ep-row { position: relative; }
+.ep-row .row-actions {
+  position: absolute;
+  right: 16px; top: 50%;
+  transform: translateY(-50%);
+  display: flex; gap: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s, transform .2s;
+  background: var(--bg-hover);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  box-shadow: -10px 0 16px var(--bg-hover);
+  border: 1px solid var(--border);
+}
+.ep-row:hover .row-actions {
+  opacity: 1; pointer-events: all;
+  transform: translateY(-50%) translateX(-4px);
+}
+
+/* ── Score Pill ────────────────────────────────────────────── */
+.score-pill {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: -0.02em;
+}
+
 /* ── Badges ────────────────────────────────────────────────── */
 .badge {
   display: inline-flex;
@@ -575,6 +605,19 @@ tr:hover td { background: var(--bg-hover); cursor: pointer; }
 }
 
 @media (max-width: 800px) { .compare-grid { grid-template-columns: 1fr; } }
+
+/* ── Compare Divergence ────────────────────────────────────── */
+.diverge-marker {
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  padding: 8px 0;
+  margin: 16px 0;
+  border-top: 1px dashed rgba(244, 63, 94, 0.4);
+  letter-spacing: 0.1em;
+}
 
 /* ── Recall ────────────────────────────────────────────────── */
 .recall-search { padding: 24px; margin-bottom: 24px; background: rgba(0,0,0,0.2); }
@@ -795,6 +838,18 @@ tr:hover td { background: var(--bg-hover); cursor: pointer; }
   color: var(--text-muted);
   font-size: 14px;
   font-weight: 500;
+}
+
+/* ── Skeletons ─────────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%);
+  background-size: 400% 100%;
+  animation: skeletonLoad 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+@keyframes skeletonLoad {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
 }
 
 /* ── Toast ─────────────────────────────────────────────────── */

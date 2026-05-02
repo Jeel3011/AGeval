@@ -111,7 +111,7 @@ class TestReasoningExtractor:
         assert "look this up" in result
 
     def test_no_reasoning(self):
-        assert ReasoningExtractor.extract("plain output") is None
+        assert ReasoningExtractor.extract("short") is None
 
     def test_none_input(self):
         assert ReasoningExtractor.extract(None) is None

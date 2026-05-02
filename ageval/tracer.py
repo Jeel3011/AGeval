@@ -69,7 +69,7 @@ def _classify_error(exc: Exception) -> tuple[str, bool]:
     return "unknown", True
 
 
-def _extract_reasoning(text: str | None) -> str | None:
+def _extract_reasoning(text: Any) -> str | None:
     """
     Extract reasoning/chain-of-thought from LLM output.
     Supports 3 formats (synced with sdk/episodic_sdk.py ReasoningExtractor):
@@ -77,32 +77,54 @@ def _extract_reasoning(text: str | None) -> str | None:
       2. ReAct: Thought: / Reasoning: / Think:
       3. OpenAI: content before a tool-call block
     """
-    if not text or not text.strip():
+    if not text:
         return None
+        
+    extracted_text = ""
+    if isinstance(text, list):
+        # Anthropic style blocks
+        texts = []
+        for blk in text:
+            if isinstance(blk, dict):
+                if blk.get("type") == "text":
+                    texts.append(blk.get("text", ""))
+                elif blk.get("type") == "thinking":
+                    texts.append(blk.get("thinking", ""))
+            elif isinstance(blk, str):
+                texts.append(blk)
+        extracted_text = "\n".join(texts)
+    elif isinstance(text, str):
+        extracted_text = text
+    else:
+        try:
+            if hasattr(text, "content"):
+                return _extract_reasoning(text.content)
+        except Exception:
+            pass
+        extracted_text = str(text)
+
+    if not extracted_text or not extracted_text.strip():
+        return None
+
     # 1. XML/tag format (<reasoning> or <thinking>)
     m = re.search(
         r"<(?:reasoning|thinking)[^>]*>(.*?)</(?:reasoning|thinking)>",
-        text, re.DOTALL | re.IGNORECASE,
+        extracted_text, re.DOTALL | re.IGNORECASE,
     )
     if m:
         return m.group(1).strip() or None
     # 2. ReAct format (Thought: / Think: / Reasoning:)
     m = re.search(
         r"^(?:thought|reasoning|think)[:\s]+(.+?)(?=\n(?:action|tool|observation)|$)",
-        text, re.DOTALL | re.IGNORECASE | re.MULTILINE,
+        extracted_text, re.DOTALL | re.IGNORECASE | re.MULTILINE,
     )
     if m:
         extracted = m.group(1).strip()
         return extracted or None
-    # 3. OpenAI content before tool call block
-    m = re.search(
-        r'^(.+?)(?=\n(?:```|\{\s*\"type\"\s*:|function_call|tool_call))',
-        text, re.DOTALL,
-    )
-    if m:
-        candidate = m.group(1).strip()
-        if len(candidate) > 20 and not candidate.startswith("{"):
-            return candidate
+    # 3. Native structured outputs (OpenAI content / Anthropic text blocks)
+    candidate = extracted_text.strip()
+    if len(candidate) > 10 and not candidate.startswith(("{", "[")):
+        return candidate
     return None
 
 
@@ -338,7 +360,7 @@ class _EpisodicCallback(_BaseHandler):  # type: ignore[misc]
         self._lock           = threading.Lock()
         self._step_counter   = 0
         self._tool_starts    : dict[str, dict] = {}
-        self._last_llm       : str | None = None
+        self._last_llm       : Any | None = None
 
     def _next_step(self) -> int:
         with self._lock:
@@ -360,9 +382,12 @@ class _EpisodicCallback(_BaseHandler):  # type: ignore[misc]
 
     def on_llm_end(self, response, **kwargs):
         try:
-            self._last_llm = response.generations[0][0].text
+            self._last_llm = response.generations[0][0].message
         except Exception:
-            self._last_llm = None
+            try:
+                self._last_llm = response.generations[0][0].text
+            except Exception:
+                self._last_llm = None
 
     def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
         self._tool_starts[str(run_id)] = {
