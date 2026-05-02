@@ -317,7 +317,7 @@ try:
     _HAS_LANGCHAIN = True
 except ImportError:
     _HAS_LANGCHAIN = False
-    _BaseHandler   = object  # fallback so the class definition below still works
+    _BaseHandler = object  # type: ignore
 
 
 class _EpisodicCallback(_BaseHandler):  # type: ignore[misc]

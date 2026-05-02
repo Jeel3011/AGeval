@@ -442,9 +442,8 @@ class AgentSession:
     def __enter__(self) -> "AgentSession":
         return self.start()
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.finish()
-        return False  # don't suppress exceptions
 
 
 # ---------------------------------------------------------------------------

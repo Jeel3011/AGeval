@@ -87,7 +87,8 @@ class RedisRateLimiter:
         """Return how many requests remain in the current window."""
         redis_key = f"{self.prefix}{key}"
         try:
-            count = int(self._r.get(redis_key) or 0)
+            val = self._r.get(redis_key)
+            count = int(val) if val is not None else 0
             return max(0, self.requests - count)
         except Exception:
             return self.requests
