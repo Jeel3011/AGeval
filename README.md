@@ -1,83 +1,109 @@
 # ageval
 
-Episodic evaluation framework for LLM agents.
-Traces every tool call, scores agent behaviour, stores embeddings for similarity search.
+**Episodic evaluation framework for LLM agents — works with any framework.**
+
+One line of code → every tool call traced, every run scored, every episode searchable.
+
+[![CI](https://github.com/Jeel3011/AGeval/actions/workflows/ci.yml/badge.svg)](https://github.com/Jeel3011/AGeval/actions)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
-## Supported Frameworks
+## Why AGeval?
 
-| Framework | Integration path | Effort |
-|-----------|-----------------|--------|
-| **LangGraph / LangChain** | `trace_agent()` — one-line drop-in | Zero changes |
-| **AutoGen, CrewAI, custom loops** | `EpisodeSession` + `@episodic_trace` | Wrap each tool call |
-| **Any async agent** | `async_episodic_trace` decorator | Wrap each tool call |
-
-> **Note:** The LangSmith dependency is fully optional. Pass `run_id="none"` to score using only your step data.
+| Problem | AGeval Solution |
+|---------|----------------|
+| "Is my agent getting better or worse?" | **Automatic scoring** — every run gets a reliability number |
+| "What happened in that failed run?" | **Full trace** — every tool call, input, output, latency, reasoning |
+| "Has my agent seen a task like this before?" | **Episodic memory** — pgvector similarity search across all past runs |
+| "Which framework do I need to use?" | **Any framework** — LangGraph, OpenAI, CrewAI, AutoGen, or fully custom |
 
 ---
 
 ## Install
 
 ```bash
-# from PyPI (once published)
 pip install ageval
 
-# or directly from GitHub
-pip install git+https://github.com/Jeel3011/AGeval.git#subdirectory=ageval
+# With framework-specific extras:
+pip install ageval[openai]      # For OpenAI function-calling agents
+pip install ageval[langchain]   # For LangGraph / LangChain agents
+pip install ageval[all]         # Everything
 ```
 
 ---
 
-## Setup — 2 steps
+## Quick Start — 3 Ways to Integrate
 
-**Step 1 — Add one env var to your `.env`**
+### 1. Any Agent (Universal — works with everything)
 
-```bash
-AGEVAL_API_KEY=ageval-sk-xxxxxxxxxxxxxxxx   # the ONLY thing you need
-```
-
-**Step 2 — Replace your `agent.invoke()` with `trace_agent()`**
-
-Before:
 ```python
-result = react_app.invoke({"messages": [question]})
+from ageval import AgentSession
+
+with AgentSession(agent_id="my_agent_v1", task="book a flight to Paris") as session:
+    # Your agent does its thing — any framework, any language model
+    result = search_flights("Paris")
+    session.record_step(
+        tool_name="search_flights",
+        tool_input={"destination": "Paris"},
+        tool_output=result,
+        success=True,
+        reasoning="User wants to go to Paris",
+        latency_ms=120,
+    )
+
+    # Or wrap functions for automatic tracing:
+    traced_hotels = session.traced(search_hotels, reasoning="Finding hotels")
+    hotels = traced_hotels("Paris", budget="moderate")
 ```
 
-After:
+### 2. OpenAI Function Calling
+
+```python
+from ageval import trace_openai
+from openai import OpenAI
+
+client = OpenAI()
+result = trace_openai(
+    client=client,
+    messages=[{"role": "user", "content": "Plan a trip to Paris"}],
+    tools=my_tool_definitions,
+    tool_functions={"search_flights": search_flights, "search_hotels": search_hotels},
+    agent_id="trip_planner_v1",
+    task="Plan a trip to Paris",
+)
+# result["episode_id"] → use to query scores later
+```
+
+### 3. LangGraph / LangChain (Zero Changes)
+
 ```python
 from ageval import trace_agent
 
 result = trace_agent(
-    agent    = react_app,
-    input    = {"messages": [question]},
-    agent_id = "my_agent_v1",
-    task     = question,
+    agent    = your_langgraph_app,
+    input    = {"messages": [("user", "Plan a trip to Paris")]},
+    agent_id = "trip_planner_v1",
+    task     = "Plan a trip to Paris",
 )
 ```
 
-That's it. Every agent run is now:
-- **Traced** — every tool call captured (input, output, latency, error category)
-- **Scored** — success rate, recovery rate, reasoning coverage, efficiency
-- **Judged** — LLM-as-judge evaluation of task completion and reasoning quality
-- **Embedded** — pgvector for similarity search across episodes
-- **Stored** in Supabase
-
 ---
 
-## What gets captured automatically
+## What Gets Captured
 
 For every tool call your agent makes:
 
 | Field | What it means |
 |---|---|
 | `tool_name` | Which tool was called |
-| `tool_input` | What was passed in (dict, str, list — any JSON) |
-| `tool_output` | What came back (dict, str, list — any JSON) |
+| `tool_input` | What was passed in (any JSON) |
+| `tool_output` | What came back (any JSON) |
 | `success` | Did it work |
 | `error_category` | `agent_error` / `env_error` / `unknown` |
 | `is_recoverable` | Should the agent retry |
-| `reasoning` | Why the agent made this call (extracted from LLM output) |
+| `reasoning` | Why the agent made this call |
 | `latency_ms` | How long it took |
 
 ---
@@ -92,22 +118,33 @@ Deterministic, no LLM required:
 | Metric | What it measures |
 |---|---|
 | `success_rate` | Fraction of tool calls that succeeded |
-| `recovery_rate` | Fraction of `env_errors` followed by a successful step |
-| `reasoning_coverage` | Fraction of steps where the agent provided reasoning |
+| `recovery_rate` | Fraction of env_errors followed by a successful step |
+| `reasoning_coverage` | Fraction of steps with reasoning provided |
 | `efficiency_score` | Penalises back-to-back duplicate tool calls |
 
 ### LLM judge (`eval/llm_judge.py`)
-Uses GPT-4o-mini to evaluate (requires `OPENAI_API_KEY`).
-The judge receives the full step trace **and** the final agent output for grounded scoring:
+Uses GPT-4o-mini (or any model) for qualitative evaluation:
 
 | Metric | What it measures |
 |---|---|
 | `task_completion` | Did the agent achieve the stated goal? |
 | `reasoning_quality` | Was the chain-of-thought coherent? |
-| `error_handling` | Did the agent recover gracefully from failures? |
+| `error_handling` | Did the agent recover gracefully? |
 | `output_quality` | Is the final output useful and accurate? |
 
-Both scorers write to `episode_scores` with their respective `scorer` name.
+### Custom metrics (NEW in v0.3)
+
+Define your own domain-specific metrics:
+
+```python
+from ageval import register_metric
+
+@register_metric("cost_efficiency", weight=0.3)
+def cost_efficiency(steps, episode):
+    """Did the agent pick the cheapest option?"""
+    prices = [s["tool_output"].get("price", 999) for s in steps if s.get("success")]
+    return 1.0 if min(prices, default=999) < 500 else 0.5
+```
 
 ---
 
@@ -121,93 +158,87 @@ Features:
 - **Rule score + LLM judge score breakdown**
 - **Compare** two episodes side-by-side
 - **Recall** — find past runs similar to any task (semantic search)
-
-The dashboard asks for your API key on first load and stores it in `sessionStorage` only.
+- **Score trends** — track agent reliability over time (via `/trends` API)
 
 ---
 
-## Lower-level SDK (for fine-grained control — any framework)
+## API Endpoints
 
-```python
-from sdk.episodic_sdk import EpisodeSession
-
-with EpisodeSession(agent_id="my_agent", task="do something") as session:
-    session.start()
-
-    # Wrap each tool call manually
-    traced_search = session.trace(search_fn, reasoning=llm_output)
-    result = traced_search(query)
-
-# EpisodeSession.__exit__ calls finish() automatically
-
-# Batched mode (fewer HTTP calls — good for high-volume agents):
-session = EpisodeSession(agent_id="my_agent", batch=True)
-session.start()
-traced = session.trace(my_tool)
-traced(args)
-session.finish()   # flushes all steps in one POST
+### Ingestion (SDK → Server)
+```
+POST /episodes       — create a stub episode
+POST /steps          — write one step
+POST /steps/batch    — write multiple steps
+POST /jobs           — trigger scoring
 ```
 
-For non-LangChain agents, simply omit `langsmith_run_id` (or pass `None`) — the
-merger will score using step data only.
+### Query (Dashboard / CLI)
+```
+GET  /episodes                 — list episodes
+GET  /episodes/{id}            — full detail + steps + scores
+GET  /episodes/{id}/steps      — paginated steps
+GET  /trends?agent_id=X        — score time-series (NEW)
+GET  /similar?episode_id=X     — find similar episodes
+GET  /recall?task=...          — semantic search by task
+GET  /compare?episode_a=X&episode_b=Y
+```
 
----
-
-## Query API
-
-After episodes are processed, query your data:
-
-```bash
-# List your episodes
-GET /episodes?agent_id=my_agent_v1&limit=20
-
-# Get full episode detail (steps + scores)
-GET /episodes/ep_3f8a1c2d4e5b6f7a
-
-# Get steps only (paginated)
-GET /episodes/ep_3f8a1c2d4e5b6f7a/steps?limit=50&offset=0
-
-# Poll merge job status
-GET /jobs/ep_3f8a1c2d4e5b6f7a/status
-
-# Find similar episodes (requires embeddings)
-GET /similar?episode_id=ep_3f8a1c2d4e5b6f7a&k=5
-
-# Search episode memory by task description
-GET /recall?task=plan+a+trip+to+Paris&k=5
+### Key Management
+```
+POST /register                 — create API key (admin only)
+POST /keys/rotate              — rotate your key
+GET  /keys                     — list your keys
+DELETE /keys/{id}              — revoke a key
 ```
 
 All requests require `Authorization: Bearer ageval-sk-<your-key>`.
 
 ---
 
-## Run the merger worker (server-side)
+## Supported Frameworks
+
+| Framework | Integration | Effort |
+|-----------|-------------|--------|
+| **Any custom agent** | `AgentSession` + `record_step()` | Wrap each tool call |
+| **OpenAI function calling** | `trace_openai()` — full loop | One function call |
+| **LangGraph / LangChain** | `trace_agent()` — drop-in | Zero changes |
+| **CrewAI, AutoGen** | `AgentSession` + `traced()` | Wrap each tool call |
+| **Any async agent** | `AgentSession` + `traced_async()` | Wrap each tool call |
+
+---
+
+## Run the Server
 
 ```bash
-# Required on the SERVER only:
+# Required:
 AGEVAL_SUPABASE_URL=...
 AGEVAL_SUPABASE_SERVICE_KEY=...
-AGEVAL_ADMIN_SECRET=...      # required — no default, must be set explicitly
+AGEVAL_ADMIN_SECRET=...        # required — no default
 
 # Optional:
-OPENAI_API_KEY=...           # for embeddings + LLM judge
-LANGSMITH_API_KEY=...        # only needed for LangChain agents
-AGEVAL_WEBHOOK_SECRET=...    # signs webhook payloads (HMAC-SHA256)
+OPENAI_API_KEY=...             # for embeddings + LLM judge
+LANGSMITH_API_KEY=...          # only for LangChain agents
 
+# Start:
+uvicorn main:app --reload
+
+# Start the merger worker:
 python -m merger.worker
 ```
 
 ---
 
-## If tracing is not configured
+## Graceful Degradation
 
-If `AGEVAL_API_KEY` is not set, `trace_agent()` falls back to a plain
-`agent.invoke()` — your agent runs normally with zero overhead.
-No crashes, no exceptions.
+If `AGEVAL_API_KEY` is not set:
+- `trace_agent()` falls back to plain `agent.invoke()`
+- `trace_openai()` falls back to plain `chat.completions.create()`
+- `AgentSession` records steps locally but doesn't send them
+- **Zero crashes, zero overhead, zero exceptions**
 
 ---
 
-## Run tests
+## Run Tests
 
 ```bash
 pip install -r requirements-dev.txt
@@ -216,9 +247,17 @@ pytest tests/ -v
 
 ---
 
-## Security notes
+## Security
 
-- The `/register` endpoint is **disabled** unless `AGEVAL_ADMIN_SECRET` is set on the server.
-  Never deploy without explicitly setting this to a strong random value.
-- Webhook URLs are validated against SSRF blocklists at registration time.
-- API keys are stored as SHA-256 hashes only — the raw key is never stored.
+- API keys stored as SHA-256 hashes only — raw key never stored
+- SSRF protection on webhook URLs (registration + delivery time DNS re-check)
+- Row Level Security (RLS) at Postgres layer — multi-tenant isolation
+- HMAC-SHA256 webhook signatures
+- Registration disabled unless `AGEVAL_ADMIN_SECRET` is explicitly set
+- Rate limiting (Redis or in-memory) per API key
+
+---
+
+## License
+
+MIT

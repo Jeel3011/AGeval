@@ -36,7 +36,24 @@ jobs:
       - name: Verify package import
         run: |
           pip install -e . --quiet
-          python -c "import ageval; print(f'ageval {ageval.__version__} imports OK')"
+          python -c "
+          import ageval
+          print(f'ageval {ageval.__version__} imports OK')
+          from ageval import AgentSession, trace_agent, trace_callable, classify_error
+          from ageval import register_metric, list_metrics, score_with_custom_metrics
+          print(f'All framework-agnostic APIs importable')
+          print(f'{len(list_metrics())} built-in metrics registered')
+          assert ageval.__version__ == '0.3.0', f'Version mismatch: {ageval.__version__}'
+          print('Version check passed')
+          "
+
+      - name: Verify OpenAI tracer import
+        run: |
+          python -c "
+          from ageval import trace_openai
+          assert trace_openai is not None, 'trace_openai should be importable with openai installed'
+          print('OpenAI tracer importable')
+          "
 
       - name: Guard against tracked secrets
         run: |
@@ -69,5 +86,5 @@ jobs:
         run: ruff check . --select E,W,F --ignore E501,E402 --per-file-ignores "__init__.py:F401"
 
       - name: Run mypy (type check — main modules)
-        run: mypy main.py merger/ eval/ --ignore-missing-imports --no-strict-optional
+        run: mypy main.py merger/ eval/ ageval/ --ignore-missing-imports --no-strict-optional
         continue-on-error: true   # type errors are warnings for now, not blockers

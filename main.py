@@ -82,7 +82,20 @@ if _log_format == "json":
 else:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 
-app = FastAPI(title="ageval ingestion API", version="0.2.0")
+app = FastAPI(title="ageval ingestion API", version="0.3.0")
+
+# ---------------------------------------------------------------------------
+# Global exception handler — NEVER leak stack traces to clients
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Catch unhandled exceptions and return a sanitized error response."""
+    _inc_metric("errors_total")
+    log.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. Check server logs for details."},
+    )
 
 _cors_origins = os.environ.get("AGEVAL_CORS_ORIGINS", "").strip()
 if not _cors_origins:
@@ -363,7 +376,7 @@ def _validate_webhook_url(url: str) -> None:
 # ---------------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 @app.get("/metrics")
@@ -873,6 +886,70 @@ def find_similar(
     return {
         "source_episode_id": episode_id,
         "similar"          : rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Score trends — time-series data for dashboard charts
+# ---------------------------------------------------------------------------
+@app.get("/trends")
+def score_trends(
+    agent_id: str       = Query(..., description="Agent to get trends for"),
+    scorer  : str       = Query("rules", description="Scorer name: 'rules' or 'llm_judge' or 'custom'"),
+    limit   : int       = Query(50, ge=1, le=500, description="Max data points"),
+    user_id : str       = Depends(verify_api_key),
+):
+    """
+    Get score trends over time for a specific agent.
+    Returns time-series data suitable for charting.
+    """
+    db = get_db()
+
+    # Join episodes with scores to get time-series
+    eps_resp = (
+        db.table("episodes")
+        .select("episode_id, agent_id, task, outcome, total_steps, created_at")
+        .eq("user_id", user_id)
+        .eq("agent_id", agent_id)
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+
+    if not eps_resp.data:
+        return {"agent_id": agent_id, "scorer": scorer, "data_points": [], "count": 0}
+
+    ep_ids = [e["episode_id"] for e in eps_resp.data]
+
+    scores_resp = (
+        db.table("episode_scores")
+        .select("episode_id, score, breakdown, created_at")
+        .eq("scorer", scorer)
+        .in_("episode_id", ep_ids)
+        .execute()
+    )
+
+    score_map = {s["episode_id"]: s for s in (scores_resp.data or [])}
+
+    data_points = []
+    for ep in eps_resp.data:
+        score_data = score_map.get(ep["episode_id"])
+        data_points.append({
+            "episode_id" : ep["episode_id"],
+            "agent_id"   : ep["agent_id"],
+            "task"       : ep.get("task"),
+            "outcome"    : ep.get("outcome"),
+            "total_steps": ep.get("total_steps"),
+            "score"      : float(score_data["score"]) if score_data else None,
+            "breakdown"  : score_data.get("breakdown") if score_data else None,
+            "timestamp"  : ep["created_at"],
+        })
+
+    return {
+        "agent_id"    : agent_id,
+        "scorer"      : scorer,
+        "data_points" : data_points,
+        "count"       : len(data_points),
     }
 
 
