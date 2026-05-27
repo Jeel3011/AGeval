@@ -1,18 +1,42 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Key, Webhook, Database, Save, Loader2, CheckCircle2, Plus, Copy, Trash2, X } from "lucide-react";
+import { keysApi } from "@/lib/api-client";
 
 export default function SettingsPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const [generatedKey, setGeneratedKey] = useState<string | null>(null);
-  const [apiKeys, setApiKeys] = useState([
-    { id: "k_1", label: "Production Agents", prefix: "ageval-sk-9f82...", created: "Oct 12, 2026" },
-    { id: "k_2", label: "CI/CD Pipeline", prefix: "ageval-sk-3a1b...", created: "Oct 20, 2026" }
-  ]);
+  const [apiKeys, setApiKeys] = useState<any[]>([]);
   const [newKeyLabel, setNewKeyLabel] = useState("");
+  const [adminSecret, setAdminSecret] = useState("");
+  const [isLoadingKeys, setIsLoadingKeys] = useState(true);
+
+  // Load existing keys from backend
+  useEffect(() => {
+    const fetchKeys = async () => {
+      try {
+        const data = await keysApi.getKeys();
+        if (data.keys) {
+          // Format them nicely for UI
+          const formatted = data.keys.map((k: any) => ({
+            id: k.id,
+            label: k.label || "Untitled Key",
+            prefix: k.is_active ? "ageval-sk-..." : "Revoked",
+            created: new Date(k.created_at).toLocaleDateString()
+          }));
+          setApiKeys(formatted);
+        }
+      } catch (err) {
+        console.error("Failed to fetch keys", err);
+      } finally {
+        setIsLoadingKeys(false);
+      }
+    };
+    fetchKeys();
+  }, []);
 
   const handleSave = () => {
     setIsSaving(true);
@@ -24,23 +48,48 @@ export default function SettingsPage() {
     }, 1500);
   };
 
-  const handleGenerateKey = (e: React.FormEvent) => {
+  const handleGenerateKey = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Simulate backend call to POST /keys/rotate or POST /keys
-    const newKeyString = `ageval-sk-${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`;
-    setGeneratedKey(newKeyString);
+    if (!adminSecret) {
+      alert("Admin Secret is required to generate a platform API key.");
+      return;
+    }
     
-    setApiKeys([{
-      id: `k_${Date.now()}`,
-      label: newKeyLabel || "New Key",
-      prefix: newKeyString.substring(0, 15) + "...",
-      created: "Just now"
-    }, ...apiKeys]);
+    try {
+      const data = await keysApi.registerKey(newKeyLabel, adminSecret);
+      setGeneratedKey(data.api_key);
+      
+      // Add it to the top of our table visually
+      setApiKeys([{
+        id: `k_${Date.now()}`,
+        label: newKeyLabel || "New Key",
+        prefix: data.api_key.substring(0, 15) + "...",
+        created: "Just now"
+      }, ...apiKeys]);
+      
+      // Also automatically authenticate the browser with this new key if it's the first one
+      if (apiKeys.length === 0) {
+        localStorage.setItem("ageval_api_key", data.api_key);
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert(err.response?.data?.detail || "Failed to generate key. Check your admin secret.");
+    }
+  };
+
+  const handleRevoke = async (id: string) => {
+    if (!confirm("Are you sure you want to revoke this key? Any agents using it will stop working immediately.")) return;
+    try {
+      await keysApi.revokeKey(id);
+      setApiKeys(apiKeys.filter(key => key.id !== id));
+    } catch (err) {
+      console.error("Failed to revoke", err);
+      alert("Failed to revoke key.");
+    }
   };
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
-    // Could show a quick toast here
   };
 
   return (
@@ -77,6 +126,17 @@ export default function SettingsPage() {
                     value={newKeyLabel}
                     onChange={(e) => setNewKeyLabel(e.target.value)}
                     placeholder="e.g. Jenkins CI Runner" 
+                    className="w-full h-9 rounded-md border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">Admin Secret</label>
+                  <input 
+                    type="password" 
+                    required
+                    value={adminSecret}
+                    onChange={(e) => setAdminSecret(e.target.value)}
+                    placeholder="Server AGEVAL_ADMIN_SECRET" 
                     className="w-full h-9 rounded-md border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-1 focus:ring-zinc-400"
                   />
                 </div>
@@ -150,7 +210,7 @@ export default function SettingsPage() {
                       <td className="px-6 py-3 text-zinc-500">{k.created}</td>
                       <td className="px-6 py-3 text-right">
                         <button 
-                          onClick={() => setApiKeys(apiKeys.filter(key => key.id !== k.id))}
+                          onClick={() => handleRevoke(k.id)}
                           className="text-rose-500 hover:text-rose-700 p-1 transition-colors" title="Revoke Key"
                         >
                           <Trash2 size={16} />

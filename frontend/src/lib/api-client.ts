@@ -11,10 +11,11 @@ export const apiClient = axios.create({
 
 // Interceptor to attach the API Key to all requests
 apiClient.interceptors.request.use((config) => {
-  // In a real app, this would be fetched from secure storage or NextAuth session
-  const token = localStorage.getItem('ageval_api_key') || 'ageval-sk-demo';
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('ageval_api_key') || 'ageval-sk-demo';
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
   }
   return config;
 });
@@ -51,6 +52,27 @@ export const jobsApi = {
   
   getJobStatus: async (jobId: string) => {
     const response = await apiClient.get(`/v1/jobs/${jobId}`);
+    return response.data;
+  }
+};
+
+export const keysApi = {
+  getKeys: async () => {
+    const response = await apiClient.get('/keys');
+    return response.data;
+  },
+  
+  registerKey: async (label: string, adminSecret: string) => {
+    const response = await apiClient.post('/register', { label }, {
+      headers: {
+        'x-admin-secret': adminSecret
+      }
+    });
+    return response.data;
+  },
+  
+  revokeKey: async (keyId: string) => {
+    const response = await apiClient.delete(`/keys/${keyId}`);
     return response.data;
   }
 };
