@@ -1,8 +1,8 @@
-# ageval
+# AGeval
 
-**Episodic evaluation framework for LLM agents — works with any framework.**
+**Is your agent getting better or worse?**
 
-One line of code → every tool call traced, every run scored, every episode searchable.
+AGeval is an episodic evaluation framework for LLM agents. With just one line of code, you get full observability: every tool call traced, every run scored, and every episode searchable. Go from zero to your first evaluated episode in under 5 minutes. Works with any agent framework.
 
 [![CI](https://github.com/Jeel3011/AGeval/actions/workflows/ci.yml/badge.svg)](https://github.com/Jeel3011/AGeval/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)

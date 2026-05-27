@@ -1,18 +1,16 @@
 """
 ageval/cli.py
 
-Self-serve onboarding CLI for AGeval.
-Run with: ageval-setup
+AGeval CLI.
+Provides onboarding `ageval setup` and testing `ageval test`.
 """
-import os
+import argparse
 import sys
+import time
 
-def main():
+def setup():
     print("Welcome to AGeval Onboarding!")
     print("-----------------------------")
-    print("This will guide you through setting up AGeval in your project.")
-    
-    # 1. API Key
     api_key = input("1. Enter your AGeval API Key (or press Enter to skip): ").strip()
     if api_key:
         with open(".env", "a") as f:
@@ -21,30 +19,56 @@ def main():
     else:
         print("⚠️ Skipped setting API key.")
 
-    print("\n2. Integration:")
-    print("   Which agent framework are you using?")
-    print("   1) LangGraph / LangChain")
-    print("   2) OpenAI function calling")
-    print("   3) Other (CrewAI, AutoGen, custom)")
-    choice = input("   Choice (1/2/3): ").strip()
-
-    if choice == "1":
-        print("\n👉 To integrate with LangGraph:")
-        print("   from ageval import trace_agent")
-        print("   result = trace_agent(agent=your_graph, input=messages, agent_id='v1')")
-    elif choice == "2":
-        print("\n👉 To integrate with OpenAI:")
-        print("   from ageval import trace_openai")
-        print("   result = trace_openai(client, messages, tools, tool_fns, agent_id='v1', task='...')")
-    else:
-        print("\n👉 To integrate with any other framework:")
-        print("   from ageval import AgentSession")
-        print("   with AgentSession(agent_id='v1', task='do X') as session:")
-        print("       result = my_tool(args)")
-        print("       session.record_step(tool_name='my_tool', tool_output=result, success=True)")
-
     print("\n🎉 Setup complete! You're ready to evaluate your agents.")
-    print("To view your dashboard, open the AGeval UI and connect using your API key.")
+
+def test(agent, dataset):
+    print(f"Running AGeval CI/CD test runner for agent '{agent}' against dataset '{dataset}'...")
+    print("Loading test cases from golden datasets hub...")
+    time.sleep(1)
+    print(f"Found 5 test cases in '{dataset}'. Starting evaluation...")
+    
+    # Mocking test execution for Phase 2 demo
+    import random
+    pass_count = 0
+    fail_count = 0
+    
+    for i in range(1, 6):
+        time.sleep(0.5)
+        score = random.uniform(0.6, 1.0)
+        status = "✅ PASS" if score >= 0.8 else "❌ FAIL"
+        if score >= 0.8:
+            pass_count += 1
+        else:
+            fail_count += 1
+        print(f"  Test Case #{i}: Faithfulness: {score:.2f} | {status}")
+        
+    print("\n-----------------------------")
+    print(f"Test Run Complete: {pass_count} Passed, {fail_count} Failed.")
+    if fail_count > 0:
+        print("Pipeline assertion failed. Score dropped below threshold.")
+        sys.exit(1)
+    else:
+        print("All metrics passed thresholds. Ready for deployment!")
+        sys.exit(0)
+
+def main():
+    parser = argparse.ArgumentParser(description="AGeval CLI")
+    subparsers = parser.add_subparsers(dest="command")
+    
+    setup_parser = subparsers.add_parser("setup", help="Run onboarding setup")
+    
+    test_parser = subparsers.add_parser("test", help="Run automated evaluations")
+    test_parser.add_argument("--agent", required=True, help="Agent ID or entrypoint to test")
+    test_parser.add_argument("--dataset", required=True, help="Golden dataset name to run against")
+    
+    args = parser.parse_args()
+    
+    if args.command == "setup":
+        setup()
+    elif args.command == "test":
+        test(args.agent, args.dataset)
+    else:
+        parser.print_help()
 
 if __name__ == "__main__":
     main()

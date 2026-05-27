@@ -674,6 +674,59 @@ def list_clusters(
     resp = query.order("episode_count", desc=True).execute()
     return {"clusters": resp.data or [], "count": len(resp.data or [])}
 
+@app.get("/drift")
+def get_drift(
+    agent_id: str | None = Query(None, description="Filter by agent_id"),
+    threshold: float     = Query(0.1, description="Minimum drop in score to consider as drift"),
+    user_id : str        = Depends(verify_api_key),
+):
+    """
+    Return clusters that have regressed in score by at least the threshold.
+    """
+    db = get_db()
+    query = db.table("episode_clusters").select("*").eq("user_id", user_id).lt("drift", -abs(threshold))
+    if agent_id:
+        query = query.eq("agent_id", agent_id)
+        
+    resp = query.order("drift", desc=False).execute()
+    return {"drifting_clusters": resp.data or [], "count": len(resp.data or [])}
+
+@app.get("/clusters/{cluster_id}/failures")
+def get_cluster_failures(
+    cluster_id: str,
+    user_id   : str = Depends(verify_api_key),
+):
+    """
+    Aggregate failing steps for a given cluster.
+    """
+    db = get_db()
+    
+    # First verify ownership
+    c_resp = db.table("episode_clusters").select("id").eq("id", cluster_id).eq("user_id", user_id).execute()
+    if not c_resp.data:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+        
+    # Get failed episodes in this cluster
+    ep_resp = db.table("episodes").select("episode_id").eq("cluster_id", cluster_id).eq("outcome", "failure").execute()
+    if not ep_resp.data:
+        return {"failures": []}
+        
+    ep_ids = [r["episode_id"] for r in ep_resp.data]
+    
+    # Get failed steps for those episodes
+    steps_resp = db.table("episode_steps").select("step_index, tool_name, error_category").in_("episode_id", ep_ids).eq("success", False).execute()
+    
+    # Group by tool_name and step_index
+    from collections import Counter
+    summary = Counter((s["step_index"], s["tool_name"], s["error_category"]) for s in (steps_resp.data or []))
+    
+    result = [
+        {"step_index": k[0], "tool_name": k[1], "error_category": k[2], "count": v}
+        for k, v in summary.most_common()
+    ]
+    
+    return {"failures": result}
+
 @app.get("/episodes")
 def list_episodes(
     agent_id: str | None = Query(None, description="Filter by agent_id"),
@@ -1093,3 +1146,13 @@ def _assert_episode_owned(db, episode_id: str, user_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Episode {episode_id} not found")
     if resp.data[0]["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this episode")
+
+from api.synthetic import router as synthetic_router
+from api.redteam import router as redteam_router
+from api.datasets import router as datasets_router
+from api.jobs import router as jobs_router
+
+app.include_router(synthetic_router)
+app.include_router(redteam_router)
+app.include_router(datasets_router)
+app.include_router(jobs_router)

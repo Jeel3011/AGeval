@@ -1,0 +1,32 @@
+name: "AGeval Score Gate"
+description: "Fails the PR if the agent's evaluation score drops below a threshold."
+inputs:
+  api_key:
+    description: "AGEVAL_API_KEY"
+    required: true
+  api_url:
+    description: "AGEVAL_API_URL (optional)"
+    required: false
+    default: "https://ageval-production.up.railway.app"
+  agent_id:
+    description: "The ID of the agent to check"
+    required: true
+  min_score:
+    description: "The minimum acceptable score (0.0 to 1.0)"
+    required: true
+    default: "0.8"
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    - name: Run AGeval Score Check
+      run: python ${{ github.action_path }}/main.py
+      shell: bash
+      env:
+        AGEVAL_API_KEY: ${{ inputs.api_key }}
+        AGEVAL_API_URL: ${{ inputs.api_url }}
+        AGEVAL_AGENT_ID: ${{ inputs.agent_id }}
+        AGEVAL_MIN_SCORE: ${{ inputs.min_score }}
