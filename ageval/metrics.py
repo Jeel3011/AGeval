@@ -160,6 +160,241 @@ def error_recovery_speed(steps: list[dict], episode: dict) -> float:
 
 
 # ---------------------------------------------------------------------------
+# ── Reliability & failure-analysis metrics ──────────────────────────────────
+# ---------------------------------------------------------------------------
+
+@register_metric(
+    "agent_error_rate",
+    weight=0.0,
+    description="Fraction of steps that failed due to agent mistakes (logic/validation errors). "
+                "Lower is better — 1.0 means zero agent errors.",
+)
+def agent_error_rate(steps: list[dict], episode: dict) -> float:
+    """1.0 = no agent errors; 0.0 = every step was an agent error."""
+    if not steps:
+        return 1.0
+    agent_errors = sum(1 for s in steps if s.get("error_category") == "agent_error")
+    return round(1.0 - agent_errors / len(steps), 4)
+
+
+@register_metric(
+    "env_error_rate",
+    weight=0.0,
+    description="Fraction of steps that failed due to transient environment errors. "
+                "High rate → the agent's environment is flaky.",
+)
+def env_error_rate(steps: list[dict], episode: dict) -> float:
+    """1.0 = no env errors; 0.0 = every step hit an env error."""
+    if not steps:
+        return 1.0
+    env_errors = sum(1 for s in steps if s.get("error_category") == "env_error")
+    return round(1.0 - env_errors / len(steps), 4)
+
+
+@register_metric(
+    "fatal_error_rate",
+    weight=0.0,
+    description="Fraction of errors that were non-recoverable (is_recoverable=False). "
+                "Measures how often the agent encounters hard-stop failures.",
+)
+def fatal_error_rate(steps: list[dict], episode: dict) -> float:
+    """1.0 = all failures were recoverable; 0.0 = every failure was fatal."""
+    failures = [s for s in steps if not s.get("success")]
+    if not failures:
+        return 1.0
+    fatal = sum(1 for s in failures if s.get("is_recoverable") is False)
+    return round(1.0 - fatal / len(failures), 4)
+
+
+@register_metric(
+    "first_call_success",
+    weight=0.0,
+    description="Did the agent succeed on the very first tool call? "
+                "A proxy for how well the agent understands the task upfront.",
+)
+def first_call_success(steps: list[dict], episode: dict) -> float:
+    """1.0 if first step succeeded, 0.0 otherwise."""
+    if not steps:
+        return 0.0
+    first = min(steps, key=lambda s: s.get("step_index", 0))
+    return 1.0 if first.get("success") else 0.0
+
+
+@register_metric(
+    "last_call_success",
+    weight=0.0,
+    description="Did the final step succeed? Measures whether the agent landed cleanly.",
+)
+def last_call_success(steps: list[dict], episode: dict) -> float:
+    """1.0 if the last step succeeded, 0.0 otherwise."""
+    if not steps:
+        return 0.0
+    last = max(steps, key=lambda s: s.get("step_index", 0))
+    return 1.0 if last.get("success") else 0.0
+
+
+# ---------------------------------------------------------------------------
+# ── Cost / efficiency metrics ─────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+@register_metric(
+    "step_economy",
+    weight=0.0,
+    description="Penalizes overly long episodes. More steps = lower score, "
+                "assuming the agent should solve tasks compactly.",
+)
+def step_economy(steps: list[dict], episode: dict) -> float:
+    """1.0 for ≤3 steps; decays smoothly to 0.0 at 20+ steps."""
+    n = len(steps)
+    if n == 0:
+        return 0.0
+    if n <= 3:
+        return 1.0
+    if n >= 20:
+        return 0.0
+    return round(1.0 - (n - 3) / 17, 4)
+
+
+@register_metric(
+    "p95_step_latency",
+    weight=0.0,
+    description="How snappy individual tool calls are. "
+                "Score degrades as the 95th-percentile single-step latency grows.",
+)
+def p95_step_latency(steps: list[dict], episode: dict) -> float:
+    """1.0 if p95 step latency ≤1 s, 0.0 at ≥15 s."""
+    latencies = sorted(s.get("latency_ms") or 0 for s in steps)
+    if not latencies:
+        return 1.0
+    p95_idx = max(0, int(len(latencies) * 0.95) - 1)
+    p95_ms = latencies[p95_idx]
+    if p95_ms <= 1_000:
+        return 1.0
+    if p95_ms >= 15_000:
+        return 0.0
+    return round(1.0 - (p95_ms - 1_000) / 14_000, 4)
+
+
+@register_metric(
+    "retry_overhead",
+    weight=0.0,
+    description="What fraction of steps are retries (same tool called twice in a row after a failure)? "
+                "High retry overhead = the agent wastes tokens on repeated calls.",
+)
+def retry_overhead(steps: list[dict], episode: dict) -> float:
+    """1.0 = no retries; 0.0 = every adjacent pair is a retry."""
+    if len(steps) <= 1:
+        return 1.0
+    sorted_steps = sorted(steps, key=lambda s: s.get("step_index", 0))
+    retries = 0
+    for i in range(1, len(sorted_steps)):
+        prev = sorted_steps[i - 1]
+        curr = sorted_steps[i]
+        if (
+            not prev.get("success")
+            and curr.get("tool_name") == prev.get("tool_name")
+        ):
+            retries += 1
+    return round(1.0 - retries / (len(sorted_steps) - 1), 4)
+
+
+# ---------------------------------------------------------------------------
+# ── Agentic / goal-oriented metrics ─────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+@register_metric(
+    "tool_call_precision",
+    weight=0.0,
+    description="Ratio of successful unique-purpose tool calls to total calls. "
+                "High precision = the agent called the right tools for the right reasons.",
+)
+def tool_call_precision(steps: list[dict], episode: dict) -> float:
+    """Successful steps that used a distinct tool / total steps."""
+    if not steps:
+        return 0.0
+    successful_tools = {s.get("tool_name") for s in steps if s.get("success")}
+    return round(len(successful_tools) / len(steps), 4)
+
+
+@register_metric(
+    "goal_progress",
+    weight=0.0,
+    description="Approximates task progress as the fraction of steps with successively "
+                "different tools (no back-tracking). Rewards forward momentum.",
+)
+def goal_progress(steps: list[dict], episode: dict) -> float:
+    """Fraction of transitions that advanced to a *new* tool (vs repeated calls)."""
+    if len(steps) <= 1:
+        return 1.0 if steps and steps[0].get("success") else 0.0
+    sorted_steps = sorted(steps, key=lambda s: s.get("step_index", 0))
+    advances = sum(
+        1 for i in range(1, len(sorted_steps))
+        if sorted_steps[i].get("tool_name") != sorted_steps[i - 1].get("tool_name")
+    )
+    return round(advances / (len(sorted_steps) - 1), 4)
+
+
+@register_metric(
+    "reasoning_depth",
+    weight=0.0,
+    description="Average length of reasoning strings (longer = more detailed chain-of-thought). "
+                "Score saturates at 200 characters per step.",
+)
+def reasoning_depth(steps: list[dict], episode: dict) -> float:
+    """Average reasoning length capped at 200 chars → 1.0."""
+    if not steps:
+        return 0.0
+    total = sum(
+        min(len(str(s.get("reasoning") or "")), 200)
+        for s in steps
+    )
+    return round(total / (len(steps) * 200), 4)
+
+
+# ---------------------------------------------------------------------------
+# ── Memory / recall metrics ───────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+@register_metric(
+    "multi_tool_usage",
+    weight=0.0,
+    description="Did the agent use more than one distinct tool? "
+                "Single-tool agents often miss the full picture.",
+)
+def multi_tool_usage(steps: list[dict], episode: dict) -> float:
+    """1.0 if ≥2 distinct tools used; 0.5 if exactly 1; 0.0 if no steps."""
+    if not steps:
+        return 0.0
+    unique = len(set(s.get("tool_name", "") for s in steps))
+    if unique >= 2:
+        return 1.0
+    return 0.5 if unique == 1 else 0.0
+
+
+@register_metric(
+    "output_richness",
+    weight=0.0,
+    description="How information-dense are the tool outputs? "
+                "Richer outputs (longer, structured) suggest better tool calls.",
+)
+def output_richness(steps: list[dict], episode: dict) -> float:
+    """Average raw JSON length of successful outputs, capped at 500 chars → 1.0."""
+    import json as _json
+    successful = [s for s in steps if s.get("success") and s.get("tool_output") is not None]
+    if not successful:
+        return 0.0
+    lengths = []
+    for s in successful:
+        try:
+            out = s["tool_output"]
+            raw = _json.dumps(out) if not isinstance(out, str) else out
+            lengths.append(min(len(raw), 500))
+        except (TypeError, ValueError):
+            lengths.append(0)
+    return round(sum(lengths) / (len(lengths) * 500), 4)
+
+
+# ---------------------------------------------------------------------------
 # Scoring function that combines built-in + custom metrics
 # ---------------------------------------------------------------------------
 def score_with_custom_metrics(

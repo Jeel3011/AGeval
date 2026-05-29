@@ -727,16 +727,31 @@ def get_cluster_failures(
 
     return {"failures": result}
 
+@app.get("/agents")
+def list_agents(user_id: str = Depends(verify_api_key)):
+    """List all distinct agent_ids that have ever run an episode for this user."""
+    db = get_db()
+    resp = (
+        db.table("episodes")
+        .select("agent_id")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    agents = sorted({row["agent_id"] for row in (resp.data or []) if row.get("agent_id")})
+    return {"agents": agents, "count": len(agents)}
+
+
 @app.get("/episodes")
 def list_episodes(
     agent_id: str | None = Query(None, description="Filter by agent_id"),
+    outcome : str | None = Query(None, description="Filter by outcome: success | partial | failure"),
     limit   : int        = Query(50,   ge=1, le=500),
     offset  : int        = Query(0,    ge=0),
     user_id : str        = Depends(verify_api_key),
 ):
     """
     List episodes for the authenticated user, newest first.
-    Optionally filter by agent_id.
+    Optionally filter by agent_id and/or outcome.
     """
     db    = get_db()
     query = (
@@ -748,6 +763,8 @@ def list_episodes(
     )
     if agent_id:
         query = query.eq("agent_id", agent_id)
+    if outcome:
+        query = query.eq("outcome", outcome)
 
     resp = query.execute()
     return {"episodes": resp.data or [], "count": len(resp.data or [])}

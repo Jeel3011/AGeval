@@ -2,28 +2,7 @@ version: '3.8'
 
 services:
   # --------------------------------------------------------
-  # ClickHouse - High-performance columnar database for traces
-  # --------------------------------------------------------
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    container_name: ageval-clickhouse
-    ports:
-      - "8123:8123" # HTTP interface
-      - "9000:9000" # Native client
-    environment:
-      - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=
-      - CLICKHOUSE_DB=ageval_traces
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./docker/clickhouse-init:/docker-entrypoint-initdb.d
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-
-  # --------------------------------------------------------
-  # Redis - Used as the message broker (Streams) and cache
+  # Redis — rate-limiter backend for the API
   # --------------------------------------------------------
   redis:
     image: redis:7-alpine
@@ -33,9 +12,14 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   # --------------------------------------------------------
-  # Backend API - FastAPI (simulated for compose)
+  # AGeval ingestion + query API (FastAPI)
   # --------------------------------------------------------
   api:
     build:
@@ -45,16 +29,55 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - clickhouse
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - CLICKHOUSE_URL=clickhouse://clickhouse:9000/ageval_traces
       - AGEVAL_SUPABASE_URL=${AGEVAL_SUPABASE_URL}
       - AGEVAL_SUPABASE_SERVICE_KEY=${AGEVAL_SUPABASE_SERVICE_KEY}
+      - AGEVAL_ADMIN_SECRET=${AGEVAL_ADMIN_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AGEVAL_CORS_ORIGINS=${AGEVAL_CORS_ORIGINS:-*}
+    env_file:
+      - .env
+
+  # --------------------------------------------------------
+  # Merger worker — polls episode_jobs, scores episodes,
+  # generates embeddings, runs clustering
+  # --------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: ageval-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - AGEVAL_SUPABASE_URL=${AGEVAL_SUPABASE_URL}
+      - AGEVAL_SUPABASE_SERVICE_KEY=${AGEVAL_SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY}
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  # --------------------------------------------------------
+  # Next.js dashboard (production build)
+  # --------------------------------------------------------
+  dashboard:
+    image: node:20-alpine
+    container_name: ageval-dashboard
+    working_dir: /app
+    command: sh -c "npm ci --quiet && npm run build && npm start"
+    ports:
+      - "3000:3000"
     volumes:
-      - .:/app
+      - ./frontend:/app
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:8000
+    depends_on:
+      - api
 
 volumes:
-  clickhouse_data:
   redis_data:

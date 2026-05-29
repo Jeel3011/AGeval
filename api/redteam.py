@@ -5,6 +5,7 @@ Red Teaming & Security API.
 Automated adversarial prompt injection and jailbreak generation.
 """
 
+import uuid
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 import logging
@@ -30,8 +31,7 @@ def launch_attack_simulation(req: AttackRequest):
     """
     log.info(f"Launching red team simulation against agent {req.agent_id} using vectors: {req.attack_vectors}")
 
-    # Mocking the attack simulation enqueue process
-    job_id = "rt_sim_99182"
+    job_id = f"rt_{uuid.uuid4().hex[:8]}"
 
     return {
         "status": "Simulation queued",

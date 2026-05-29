@@ -36,8 +36,34 @@ Fallback:
 # Framework-agnostic (works with ANY agent)
 from ageval.session import AgentSession, trace_callable, classify_error
 
-# Custom metrics
-from ageval.metrics import register_metric, list_metrics, score_with_custom_metrics
+# Custom metrics + built-in metric catalogue
+from ageval.metrics import (
+    register_metric,
+    list_metrics,
+    get_metric,
+    unregister_metric,
+    score_with_custom_metrics,
+    # built-in reliability
+    agent_error_rate,
+    env_error_rate,
+    fatal_error_rate,
+    first_call_success,
+    last_call_success,
+    # built-in efficiency
+    step_economy,
+    p95_step_latency,
+    retry_overhead,
+    # built-in agentic
+    tool_call_precision,
+    goal_progress,
+    reasoning_depth,
+    # built-in observability
+    tool_diversity,
+    multi_tool_usage,
+    output_richness,
+    latency_budget,
+    error_recovery_speed,
+)
 
 # LangGraph / LangChain (optional — only works if langchain is installed)
 from ageval.tracer import trace_agent, recall_episodes, compare_episodes
@@ -53,10 +79,32 @@ __all__ = [
     "AgentSession",
     "trace_callable",
     "classify_error",
-    # Metrics
+    # Metric registry
     "register_metric",
+    "unregister_metric",
     "list_metrics",
+    "get_metric",
     "score_with_custom_metrics",
+    # Built-in reliability metrics
+    "agent_error_rate",
+    "env_error_rate",
+    "fatal_error_rate",
+    "first_call_success",
+    "last_call_success",
+    # Built-in efficiency metrics
+    "step_economy",
+    "p95_step_latency",
+    "retry_overhead",
+    # Built-in agentic metrics
+    "tool_call_precision",
+    "goal_progress",
+    "reasoning_depth",
+    # Built-in observability metrics
+    "tool_diversity",
+    "multi_tool_usage",
+    "output_richness",
+    "latency_budget",
+    "error_recovery_speed",
     # LangGraph
     "trace_agent",
     "recall_episodes",

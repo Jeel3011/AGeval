@@ -7,12 +7,15 @@ import {
   Activity,
   CheckCircle2,
   Database,
+  GitCompare,
+  Layers,
   LayoutDashboard,
+  Search,
   Settings,
   ShieldAlert,
   Sparkles,
   TerminalSquare,
-  Users
+  Users,
 } from "lucide-react";
 
 export function Sidebar() {
@@ -30,16 +33,22 @@ export function Sidebar() {
       </div>
 
       <div className="flex-1 overflow-y-auto py-6 px-4 flex flex-col gap-1">
-        <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2">Platform</div>
+        <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2">Overview</div>
         <NavItem href="/" icon={<LayoutDashboard size={18} />} label="Dashboard" active={pathname === "/"} />
-        <NavItem href="/traces" icon={<Activity size={18} />} label="Traces & Logs" active={pathname.startsWith("/traces")} />
-        <NavItem href="/datasets" icon={<Database size={18} />} label="Golden Datasets" active={pathname.startsWith("/datasets")} />
-        <NavItem href="/playground" icon={<TerminalSquare size={18} />} label="Playground" active={pathname.startsWith("/playground")} />
-        
+        <NavItem href="/traces" icon={<Activity size={18} />} label="Traces & Logs" active={pathname === "/traces"} />
+
+        <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Episodes</div>
+        <NavItem href="/episodes" icon={<Layers size={18} />} label="Episodes" active={pathname === "/episodes" || pathname.startsWith("/episodes/")} />
+        <NavItem href="/clusters" icon={<GitCompare size={18} />} label="Clusters" active={pathname.startsWith("/clusters")} />
+        <NavItem href="/recall" icon={<Search size={18} />} label="Semantic Recall" active={pathname.startsWith("/recall")} />
+        <NavItem href="/compare" icon={<GitCompare size={18} />} label="Compare" active={pathname.startsWith("/compare")} />
+
         <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Evaluation</div>
+        <NavItem href="/datasets" icon={<Database size={18} />} label="Golden Datasets" active={pathname.startsWith("/datasets")} />
         <NavItem href="/test-suites" icon={<CheckCircle2 size={18} />} label="Test Suites" active={pathname.startsWith("/test-suites")} />
         <NavItem href="/red-teaming" icon={<ShieldAlert size={18} />} label="Red Teaming" active={pathname.startsWith("/red-teaming")} />
-        
+        <NavItem href="/playground" icon={<TerminalSquare size={18} />} label="Playground" active={pathname.startsWith("/playground")} />
+
         <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Settings</div>
         <NavItem href="/team" icon={<Users size={18} />} label="Team" active={pathname.startsWith("/team")} />
         <NavItem href="/settings" icon={<Settings size={18} />} label="Configuration" active={pathname.startsWith("/settings")} />
