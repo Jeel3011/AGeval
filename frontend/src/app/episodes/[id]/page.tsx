@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { apiGet } from '@/lib/api';
 import { useToast } from '@/components/Toast';
 import { scoreColor, fmtLatency, outcomeClass } from '@/lib/utils';
-import { ChevronRight, Copy, RefreshCw, MessageSquare, Code, CheckCircle, XCircle } from 'lucide-react';
+import { ChevronRight, Copy, RefreshCw, MessageSquare, Code, CheckCircle, XCircle, SearchCode } from 'lucide-react';
 import Link from 'next/link';
 
 export default function EpisodeDetail({ params }: { params: { id: string } }) {

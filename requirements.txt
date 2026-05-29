@@ -1,8 +1,11 @@
-supabase 
-langsmith 
-fastapi 
+supabase
+langsmith
+fastapi
 python-dotenv
 openai
 langchain_core
 uvicorn[standard]
 redis>=5.0
+# Required by the merger worker's background clustering (merger/cluster.py)
+numpy
+scikit-learn

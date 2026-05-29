@@ -5,14 +5,20 @@ Synthetic Data Generation API.
 Uses LLMs to bootstrap evaluation datasets from a few seed examples.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import logging
 import os
 import json
 
+from api.deps import verify_api_key
+
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/synthetic", tags=["Synthetic Data"])
+router = APIRouter(
+    prefix="/synthetic",
+    tags=["Synthetic Data"],
+    dependencies=[Depends(verify_api_key)],
+)
 
 class GenerationRequest(BaseModel):
     seed_examples: list[dict]
@@ -27,19 +33,19 @@ def generate_synthetic_data(req: GenerationRequest):
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY must be set for synthetic generation")
-    
+
     prompt = f"""
-    You are an expert QA engineer. I will give you {len(req.seed_examples)} seed examples 
+    You are an expert QA engineer. I will give you {len(req.seed_examples)} seed examples
     of inputs and expected outputs for an LLM agent.
-    
+
     Seeds: {json.dumps(req.seed_examples, indent=2)}
-    
-    Please generate {req.num_examples_to_generate} NEW, highly varied, and challenging edge-case examples 
+
+    Please generate {req.num_examples_to_generate} NEW, highly varied, and challenging edge-case examples
     that follow the same structure. Ensure diversity in language, length, and complexity.
-    
+
     Output strictly as a JSON array of objects.
     """
-    
+
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
@@ -57,13 +63,10 @@ def generate_synthetic_data(req: GenerationRequest):
             "generated_count": req.num_examples_to_generate,
             "data": json.loads(generated_data)
         }
+    except json.JSONDecodeError as e:
+        log.error(f"Generation returned invalid JSON: {e}")
+        raise HTTPException(status_code=502, detail="Synthetic generation returned invalid JSON from the model")
     except Exception as e:
+        # Surface the failure honestly instead of returning fake "success" data.
         log.error(f"Generation failed: {e}")
-        # Return mock data if API fails to keep the flow working
-        return {
-            "status": "success", 
-            "dataset_name": req.dataset_name,
-            "generated_count": req.num_examples_to_generate,
-            "mocked": True,
-            "data": [{"input": "mock input", "expected_output": "mock output"} for _ in range(req.num_examples_to_generate)]
-        }
+        raise HTTPException(status_code=502, detail=f"Synthetic generation failed: {e}")

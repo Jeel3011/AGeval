@@ -5,7 +5,6 @@ OpenTelemetry integration for AGeval.
 Maps AGeval episode and step data to OpenTelemetry GenAI semantic conventions.
 """
 
-from typing import Optional, Dict, Any
 import logging
 
 log = logging.getLogger(__name__)
@@ -54,11 +53,11 @@ def export_episode(episode: dict, steps: list[dict]):
     ) as ep_span:
         if outcome == "failure":
             ep_span.set_status(trace.StatusCode.ERROR, "Episode failed")
-        
+
         for step in steps:
             tool_name = step.get("tool_name", "unknown")
             latency = step.get("latency_ms", 0)
-            
+
             with _otel_tracer.start_as_current_span(
                 name=f"agent.tool.{tool_name}",
                 attributes={
@@ -70,6 +69,6 @@ def export_episode(episode: dict, steps: list[dict]):
             ) as tool_span:
                 if not step.get("success", True):
                     tool_span.set_status(
-                        trace.StatusCode.ERROR, 
+                        trace.StatusCode.ERROR,
                         step.get("error_message") or "Tool failed"
                     )

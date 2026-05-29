@@ -67,9 +67,10 @@ export default function SettingsPage() {
         created: "Just now"
       }, ...apiKeys]);
       
-      // Also automatically authenticate the browser with this new key if it's the first one
+      // Also automatically authenticate the browser with this new key if it's the first one.
+      // Use the shared credential name so every page (old + new) sees it.
       if (apiKeys.length === 0) {
-        localStorage.setItem("ageval_api_key", data.api_key);
+        localStorage.setItem("ageval_key", data.api_key);
       }
     } catch (err: any) {
       console.error(err);

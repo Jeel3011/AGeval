@@ -9,10 +9,22 @@ export const apiClient = axios.create({
   },
 });
 
-// Interceptor to attach the API Key to all requests
+// Interceptor to attach the API key + base URL to all requests.
+// Credentials are shared with the rest of the app under a single key name
+// (`ageval_key` / `ageval_url`) so connecting once works everywhere. The old
+// `ageval_api_key` name is read as a fallback for in-flight sessions.
 apiClient.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
-    const token = localStorage.getItem('ageval_api_key') || 'ageval-sk-demo';
+    const base =
+      localStorage.getItem('ageval_url') || sessionStorage.getItem('ageval_url');
+    if (base) {
+      config.baseURL = base;
+    }
+
+    const token =
+      localStorage.getItem('ageval_key') ||
+      sessionStorage.getItem('ageval_key') ||
+      localStorage.getItem('ageval_api_key'); // legacy fallback
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }

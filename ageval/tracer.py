@@ -79,7 +79,7 @@ def _extract_reasoning(text: Any) -> str | None:
     """
     if not text:
         return None
-        
+
     extracted_text = ""
     if isinstance(text, list):
         # Anthropic style blocks

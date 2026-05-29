@@ -670,7 +670,7 @@ def list_clusters(
     query = db.table("episode_clusters").select("*").eq("user_id", user_id)
     if agent_id:
         query = query.eq("agent_id", agent_id)
-        
+
     resp = query.order("episode_count", desc=True).execute()
     return {"clusters": resp.data or [], "count": len(resp.data or [])}
 
@@ -687,7 +687,7 @@ def get_drift(
     query = db.table("episode_clusters").select("*").eq("user_id", user_id).lt("drift", -abs(threshold))
     if agent_id:
         query = query.eq("agent_id", agent_id)
-        
+
     resp = query.order("drift", desc=False).execute()
     return {"drifting_clusters": resp.data or [], "count": len(resp.data or [])}
 
@@ -700,31 +700,31 @@ def get_cluster_failures(
     Aggregate failing steps for a given cluster.
     """
     db = get_db()
-    
+
     # First verify ownership
     c_resp = db.table("episode_clusters").select("id").eq("id", cluster_id).eq("user_id", user_id).execute()
     if not c_resp.data:
         raise HTTPException(status_code=404, detail="Cluster not found")
-        
+
     # Get failed episodes in this cluster
     ep_resp = db.table("episodes").select("episode_id").eq("cluster_id", cluster_id).eq("outcome", "failure").execute()
     if not ep_resp.data:
         return {"failures": []}
-        
+
     ep_ids = [r["episode_id"] for r in ep_resp.data]
-    
+
     # Get failed steps for those episodes
     steps_resp = db.table("episode_steps").select("step_index, tool_name, error_category").in_("episode_id", ep_ids).eq("success", False).execute()
-    
+
     # Group by tool_name and step_index
     from collections import Counter
     summary = Counter((s["step_index"], s["tool_name"], s["error_category"]) for s in (steps_resp.data or []))
-    
+
     result = [
         {"step_index": k[0], "tool_name": k[1], "error_category": k[2], "count": v}
         for k, v in summary.most_common()
     ]
-    
+
     return {"failures": result}
 
 @app.get("/episodes")

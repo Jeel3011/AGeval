@@ -17,7 +17,7 @@ def main():
         sys.exit(1)
 
     print(f"Checking latest episodes for agent: {agent_id}")
-    
+
     try:
         req = urllib.request.Request(
             f"{api_url}/episodes?agent_id={agent_id}&limit=5",
@@ -56,13 +56,13 @@ def main():
     # Assuming the first score (usually rules-based) or the llm_judge score. Let's take average or first.
     # Typically, we care about the 'rules' score or we just take the max.
     score_val = float(scores[0]["score"])
-    
+
     print(f"Latest episode {ep_id} score: {score_val}")
-    
+
     if score_val < min_score:
         print(f"::error::Score {score_val} is below the required minimum of {min_score}")
         sys.exit(1)
-        
+
     print("::notice::AGeval Score Gate passed!")
 
 if __name__ == "__main__":

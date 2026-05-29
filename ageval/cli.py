@@ -26,12 +26,12 @@ def test(agent, dataset):
     print("Loading test cases from golden datasets hub...")
     time.sleep(1)
     print(f"Found 5 test cases in '{dataset}'. Starting evaluation...")
-    
+
     # Mocking test execution for Phase 2 demo
     import random
     pass_count = 0
     fail_count = 0
-    
+
     for i in range(1, 6):
         time.sleep(0.5)
         score = random.uniform(0.6, 1.0)
@@ -41,7 +41,7 @@ def test(agent, dataset):
         else:
             fail_count += 1
         print(f"  Test Case #{i}: Faithfulness: {score:.2f} | {status}")
-        
+
     print("\n-----------------------------")
     print(f"Test Run Complete: {pass_count} Passed, {fail_count} Failed.")
     if fail_count > 0:
@@ -54,15 +54,15 @@ def test(agent, dataset):
 def main():
     parser = argparse.ArgumentParser(description="AGeval CLI")
     subparsers = parser.add_subparsers(dest="command")
-    
-    setup_parser = subparsers.add_parser("setup", help="Run onboarding setup")
-    
+
+    subparsers.add_parser("setup", help="Run onboarding setup")
+
     test_parser = subparsers.add_parser("test", help="Run automated evaluations")
     test_parser.add_argument("--agent", required=True, help="Agent ID or entrypoint to test")
     test_parser.add_argument("--dataset", required=True, help="Golden dataset name to run against")
-    
+
     args = parser.parse_args()
-    
+
     if args.command == "setup":
         setup()
     elif args.command == "test":

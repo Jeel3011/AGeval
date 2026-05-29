@@ -1,16 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends
 from typing import List
 import uuid
-from datetime import datetime, timezone
 import logging
 
-from api.schemas import DatasetCreate, DatasetResponse, TestCase
-# In real code, import get_db and verify_api_key from main
-# For decoupling, we'll assume they are injected or we mock the DB for now
-# pending the Supabase schema generation.
+from api.schemas import DatasetCreate, DatasetResponse
+from api.deps import verify_api_key
+# NOTE: still backed by an in-memory store (see _mock_datasets). Wire to the
+# Supabase `golden_datasets`/`test_cases` tables before relying on this in prod.
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/v1/datasets", tags=["Datasets"])
+router = APIRouter(
+    prefix="/v1/datasets",
+    tags=["Datasets"],
+    dependencies=[Depends(verify_api_key)],
+)
 
 # Mock DB for the transitional period before Supabase is fully seeded
 _mock_datasets = [

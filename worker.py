@@ -34,13 +34,13 @@ def run_red_team_simulation(self, request_payload: dict, job_id: str):
     """
     log.info(f"Starting Red Team Simulation Job {job_id}")
     vectors = request_payload.get("attack_vectors", [])
-    
+
     # Simulate multi-stage attack process
     for i, vector in enumerate(vectors):
         # Update progress in actual DB...
         progress = int(((i + 1) / len(vectors)) * 100)
         self.update_state(state='PROGRESS', meta={'progress': progress})
-        
+
         # Fuzzing simulation
         time.sleep(2)
         log.info(f"[{job_id}] Testing vector: {vector}")
@@ -63,7 +63,7 @@ def generate_synthetic_data(self, request_payload: dict, job_id: str):
     """
     log.info(f"Starting Synthetic Generation Job {job_id}")
     num_to_gen = request_payload.get("num_examples_to_generate", 10)
-    
+
     generated = []
     for i in range(num_to_gen):
         progress = int(((i + 1) / num_to_gen) * 100)
@@ -73,7 +73,7 @@ def generate_synthetic_data(self, request_payload: dict, job_id: str):
             "input": f"Synthetic input variation {i}",
             "expected_output": f"Expected output variation {i}"
         })
-        
+
     log.info(f"Finished Synthetic Generation Job {job_id}")
     return {
         "status": "completed",

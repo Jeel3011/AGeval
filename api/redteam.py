@@ -5,12 +5,18 @@ Red Teaming & Security API.
 Automated adversarial prompt injection and jailbreak generation.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 import logging
 
+from api.deps import verify_api_key
+
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/redteam", tags=["Red Teaming"])
+router = APIRouter(
+    prefix="/redteam",
+    tags=["Red Teaming"],
+    dependencies=[Depends(verify_api_key)],
+)
 
 class AttackRequest(BaseModel):
     agent_id: str
@@ -23,10 +29,10 @@ def launch_attack_simulation(req: AttackRequest):
     In a real implementation, this pushes tasks to the Celery/Kafka queue.
     """
     log.info(f"Launching red team simulation against agent {req.agent_id} using vectors: {req.attack_vectors}")
-    
+
     # Mocking the attack simulation enqueue process
     job_id = "rt_sim_99182"
-    
+
     return {
         "status": "Simulation queued",
         "job_id": job_id,

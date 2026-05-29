@@ -36,8 +36,8 @@ langchain = ["langchain-core>=0.2", "langsmith>=0.1"]
 openai = ["openai>=1.0"]
 # For running the server
 server = ["fastapi>=0.100", "uvicorn[standard]", "supabase", "redis>=5.0", "scikit-learn", "numpy"]
-# Everything
-all = ["ageval[langchain,openai,server,otel]"]
+# Everything (self-reference must use the distribution name: ageval-sdk)
+all = ["ageval-sdk[langchain,openai,server,otel]"]
 # Development
 dev = ["pytest>=7", "ruff", "mypy"]
 # OpenTelemetry
@@ -68,3 +68,11 @@ per-file-ignores = {"__init__.py" = ["F401"]}
 python_version = "3.11"
 ignore_missing_imports = true
 no_strict_optional = true
+
+[tool.pytest.ini_options]
+# Only collect the real unit suite by default. The scripts at the repo root
+# (e2e_test.py, real_agent_test.py) and sdk/test_sdk.py, eval/test_rules.py are
+# live integration scripts that talk to a deployed server + Supabase at import
+# time — they break `pytest` collection when run offline. Invoke those directly
+# (e.g. `python e2e_test.py`) against a live environment instead.
+testpaths = ["tests"]
