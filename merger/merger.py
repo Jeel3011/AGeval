@@ -84,7 +84,21 @@ def run_merger(
     if final_output is not None:
         update_payload["final_output"] = final_output
 
-    client.table("episodes").update(update_payload).eq("episode_id", episode_id).execute()
+    # Episodic-memory deepening (§1.1): a stable hash of the tool-name sequence
+    # + outcome so identically-shaped runs group in O(1). Optional column —
+    # if the schema hasn't been migrated yet, retry without it (graceful).
+    from merger.fingerprint import compute_fingerprint
+    update_payload["episode_fingerprint"] = compute_fingerprint(steps, outcome)
+
+    try:
+        client.table("episodes").update(update_payload).eq("episode_id", episode_id).execute()
+    except Exception as exc:
+        if "episode_fingerprint" in str(exc) or "PGRST204" in str(exc):
+            log.warning("episode_fingerprint column missing — run sdk/schema.sql; updating without it")
+            update_payload.pop("episode_fingerprint", None)
+            client.table("episodes").update(update_payload).eq("episode_id", episode_id).execute()
+        else:
+            raise
 
     log.info(f"episodes row updated: {episode_id} | outcome={outcome} | steps={total_steps}")
 

@@ -55,8 +55,11 @@ export default function EpisodeDetail({ params }: { params: { id: string } }) {
   if (!data) return <div style={{padding:40}}>Episode not found.</div>;
 
   const { episode, steps, scores, job } = data;
+  const relative = data.relative_scores || {};
   const rulesScore = scores?.find((s:any) => s.scorer === 'rules');
   const judgeScore = scores?.find((s:any) => s.scorer === 'llm_judge');
+  const trajScore = scores?.find((s:any) => s.scorer === 'trajectory');
+  const hasRelative = relative && Object.keys(relative).length > 0;
 
   return (
     <div>
@@ -140,6 +143,48 @@ export default function EpisodeDetail({ params }: { params: { id: string } }) {
               <div style={{color:'var(--text-muted)'}}>No AI judge score</div>
             )}
           </div>
+
+          {/* Trajectory adherence (§1.3) */}
+          {trajScore && (
+            <div className="card">
+              <h3 style={{margin:0, fontSize:16, marginBottom:16}}>Trajectory Adherence</h3>
+              <div style={{display:'flex', alignItems:'center', gap:12, marginBottom:12}}>
+                <div style={{fontSize:32, fontWeight:700, color: scoreColor(trajScore.score)}}>{Math.round(trajScore.score * 100)}%</div>
+                <div style={{flex:1, height:8, background:'rgba(255,255,255,0.1)', borderRadius:4, overflow:'hidden'}}>
+                  <div style={{height:'100%', width:`${trajScore.score * 100}%`, background: scoreColor(trajScore.score)}} />
+                </div>
+              </div>
+              <div style={{fontSize:12, color:'var(--text-muted)'}}>
+                How closely this run followed the golden path for its task cluster.
+                {trajScore.breakdown?.edit_distance != null && (
+                  <> Edit distance {trajScore.breakdown.edit_distance} · {trajScore.breakdown.run_length} vs {trajScore.breakdown.golden_length} steps.</>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Peer-relative scoring (§2.3) */}
+          {hasRelative && (
+            <div className="card">
+              <h3 style={{margin:0, fontSize:16, marginBottom:16}}>Peer-Relative</h3>
+              <div style={{display:'flex', flexDirection:'column', gap:14}}>
+                {Object.entries(relative).map(([scorer, r]: [string, any]) => (
+                  <div key={scorer}>
+                    <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', fontSize:13}}>
+                      <span style={{textTransform:'capitalize'}}>{scorer.replace(/_/g,' ')}</span>
+                      <span style={{fontWeight:600}}>P{Math.round(r.percentile)}</span>
+                    </div>
+                    <div style={{height:6, background:'rgba(255,255,255,0.1)', borderRadius:3, overflow:'hidden', margin:'6px 0'}}>
+                      <div style={{height:'100%', width:`${r.percentile}%`, background: r.percentile < 25 ? 'var(--danger)' : r.percentile > 75 ? 'var(--success)' : 'var(--warning)'}} />
+                    </div>
+                    <div style={{fontSize:11, color:'var(--text-muted)'}}>
+                      {r.band} · vs {r.baseline?.n} runs like it (conf {Math.round((r.confidence ?? 0)*100)}%)
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="card">

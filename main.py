@@ -191,33 +191,73 @@ def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def verify_api_key(authorization: str = Header(...)) -> str:
-    """
-    Dependency. Validates the Bearer token against api_keys table.
-    - Rejects inactive or expired keys.
-    - Records last_used_at on each successful auth (best-effort).
-    Returns user_id on success, raises 401 on failure.
-    """
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
+# Supabase anon key + URL for verifying dashboard JWTs (humans signed in with
+# email/password). The browser holds the same anon key; verification happens by
+# asking Supabase who the token belongs to. Service key is never used here.
+_SUPABASE_ANON_KEY = os.environ.get("AGEVAL_SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_ANON_KEY")
 
-    raw_key  = authorization.removeprefix("Bearer ").strip()
+# Tiny in-process cache so we don't call Supabase /auth/v1/user on every request
+# for the same token. token -> (user_id, expiry_epoch).
+_jwt_cache: dict[str, tuple[str, float]] = {}
+_JWT_CACHE_TTL = 300  # seconds
+
+
+def _verify_supabase_jwt(token: str) -> str | None:
+    """Resolve a Supabase access token to its user UID, or None if invalid.
+
+    Verifies by calling the project's /auth/v1/user endpoint with the token.
+    Cached briefly to bound network calls. Returns None (not raise) so the
+    caller can fall through to API-key auth.
+    """
+    if not _SUPABASE_ANON_KEY:
+        return None
+
+    import time
+    now = time.time()
+    cached = _jwt_cache.get(token)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    url = os.environ.get("AGEVAL_SUPABASE_URL")
+    if not url:
+        return None
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{url}/auth/v1/user",
+            headers={"apikey": _SUPABASE_ANON_KEY, "Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            import json as _json
+            data = _json.loads(resp.read().decode())
+        uid = data.get("id")
+        if not uid:
+            return None
+        user_id = f"sb_{uid}"
+        _jwt_cache[token] = (user_id, now + _JWT_CACHE_TTL)
+        return user_id
+    except Exception as exc:
+        log.debug(f"Supabase JWT verification failed: {exc}")
+        return None
+
+
+def _verify_ageval_key(raw_key: str) -> str | None:
+    """Resolve an `ageval-sk-…` API key to its user_id, or None if invalid."""
     key_hash = _hash_key(raw_key)
-
-    db   = get_db()
-    resp = db.table("api_keys") \
-        .select("id, user_id, expires_at") \
-        .eq("key_hash", key_hash) \
-        .eq("is_active", True) \
-        .limit(1) \
+    db = get_db()
+    resp = (
+        db.table("api_keys")
+        .select("id, user_id, expires_at")
+        .eq("key_hash", key_hash)
+        .eq("is_active", True)
+        .limit(1)
         .execute()
-
+    )
     if not resp.data:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or inactive API key")
+        return None
 
     row = resp.data[0]
-
-    # Check expiry
     if row.get("expires_at"):
         expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
         if datetime.now(timezone.utc) > expires_at:
@@ -235,6 +275,42 @@ def verify_api_key(authorization: str = Header(...)) -> str:
         log.warning(f"Could not update last_used_at for key {row['id']}: {exc}")
 
     return row["user_id"]
+
+
+def verify_api_key(authorization: str = Header(...)) -> str:
+    """
+    Auth dependency accepting EITHER credential and resolving both to a user_id:
+
+      • a dashboard session — a Supabase JWT from an email/password login
+        (token does NOT start with 'ageval-sk-'); user_id = 'sb_<uid>'.
+      • an agent API key — an `ageval-sk-…` key issued from the dashboard,
+        used by the SDK for ingestion.
+
+    Returns user_id on success, raises 401 on failure.
+    """
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
+
+    token = authorization.removeprefix("Bearer ").strip()
+
+    # AGeval keys have a fixed prefix; everything else is treated as a JWT.
+    if token.startswith("ageval-sk-"):
+        user_id = _verify_ageval_key(token)
+        if user_id:
+            return user_id
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or inactive API key")
+
+    # Dashboard JWT path.
+    user_id = _verify_supabase_jwt(token)
+    if user_id:
+        return user_id
+
+    # Last resort: maybe it's an API key without the prefix (legacy keys).
+    user_id = _verify_ageval_key(token)
+    if user_id:
+        return user_id
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session/key")
 
 
 # ---------------------------------------------------------------------------
@@ -630,10 +706,28 @@ def create_job(
     db = get_db()
     _assert_episode_owned(db, body.episode_id, user_id)
 
-    # Update run_id on the episode row now that we have it
-    db.table("episodes").update(
-        {"run_id": body.run_id}
-    ).eq("episode_id", body.episode_id).execute()
+    # Update run_id on the episode row now that we have it. We also derive a
+    # provisional outcome + totals *synchronously* from the steps already
+    # written, so an episode is never left outcome-less if the merger worker
+    # isn't running. The worker later overwrites these with full scoring +
+    # embedding + clustering (its update is idempotent, so this is safe).
+    episode_update = {"run_id": body.run_id}
+    try:
+        from merger.merger import derive_outcome
+        steps = (
+            db.table("episode_steps")
+            .select("tool_name, success, latency_ms")
+            .eq("episode_id", body.episode_id)
+            .execute()
+        ).data or []
+        episode_update["outcome"] = derive_outcome(steps)
+        episode_update["total_steps"] = len(steps)
+        episode_update["total_latency_ms"] = sum(s.get("latency_ms") or 0 for s in steps)
+    except Exception as exc:
+        # Never block job creation on the provisional derive — worker will fill it.
+        log.warning(f"provisional outcome derive failed for {body.episode_id}: {exc}")
+
+    db.table("episodes").update(episode_update).eq("episode_id", body.episode_id).execute()
 
     try:
         db.table("episode_jobs").insert({
@@ -691,6 +785,45 @@ def get_drift(
     resp = query.order("drift", desc=False).execute()
     return {"drifting_clusters": resp.data or [], "count": len(resp.data or [])}
 
+@app.get("/drift/alerts")
+def get_drift_alerts(
+    limit  : int = Query(50, ge=1, le=200),
+    user_id: str = Depends(verify_api_key),
+):
+    """
+    Online drift alerts (§2.6): clusters whose recent score dropped below their
+    baseline by > k·σ, detected by the worker's drift sweep. Joins through the
+    user's clusters so only the caller's alerts are returned.
+    """
+    db = get_db()
+    # Scope to this user's clusters.
+    clusters = (
+        db.table("episode_clusters").select("id, label, agent_id").eq("user_id", user_id).execute()
+    ).data or []
+    by_id = {c["id"]: c for c in clusters}
+    if not by_id:
+        return {"alerts": [], "count": 0}
+
+    try:
+        resp = (
+            db.table("drift_alerts")
+            .select("*")
+            .in_("cluster_id", list(by_id.keys()))
+            .order("detected_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+    except Exception as exc:
+        if "PGRST205" in str(exc):
+            return {"alerts": [], "count": 0}
+        raise
+
+    alerts = []
+    for a in resp.data or []:
+        c = by_id.get(a["cluster_id"], {})
+        alerts.append({**a, "cluster_label": c.get("label"), "agent_id": c.get("agent_id")})
+    return {"alerts": alerts, "count": len(alerts)}
+
 @app.get("/clusters/{cluster_id}/failures")
 def get_cluster_failures(
     cluster_id: str,
@@ -739,6 +872,68 @@ def list_agents(user_id: str = Depends(verify_api_key)):
     )
     agents = sorted({row["agent_id"] for row in (resp.data or []) if row.get("agent_id")})
     return {"agents": agents, "count": len(agents)}
+
+
+@app.get("/agents/{agent_id}/regression")
+def agent_regression(
+    agent_id: str,
+    from_ts : str | None = Query(None, alias="from", description="Baseline window start (ISO 8601). Default: 14 days ago."),
+    to_ts   : str | None = Query(None, alias="to",   description="Boundary between baseline and 'after' (ISO 8601). Default: 7 days ago."),
+    user_id : str        = Depends(verify_api_key),
+):
+    """
+    Trajectory regression detection for an agent (§2.1).
+
+    Compares the agent's recent episodes (>= `to`) against an earlier baseline
+    ([`from`, `to`)) and surfaces per-scorer score deltas, step/outcome drift,
+    newly-appearing failure signatures, and new trajectory shapes. Defaults to
+    last-7-days vs prior-7-days when the window params are omitted.
+    """
+    from api.regression import fetch_and_compute
+    db = get_db()
+    return fetch_and_compute(db, user_id, agent_id, from_ts, to_ts)
+
+
+@app.get("/compare")
+def pairwise_compare(
+    a       : str        = Query(..., description="Episode A id"),
+    b       : str        = Query(..., description="Episode B id"),
+    llm     : bool       = Query(True, description="Include the optional LLM pairwise verdict"),
+    user_id : str        = Depends(verify_api_key),
+):
+    """
+    Pairwise A/B comparison of two episodes (§2.4).
+
+    Returns a deterministic trajectory diff (tool-sequence alignment, step/score
+    deltas) plus, when `llm=true` and an LLM key is configured, a pairwise judge
+    verdict on which run is better.
+    """
+    from eval.pairwise import compare_episodes
+    db = get_db()
+    try:
+        return compare_episodes(db, user_id, a, b, use_llm=llm)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/episodes/{episode_id}/score/reference")
+def score_reference(
+    episode_id: str,
+    body      : dict | None = None,
+    user_id   : str         = Depends(verify_api_key),
+):
+    """
+    On-demand reference-grounded scoring (§2.5): answer-relevance (+ faithfulness
+    when `context` is provided). Opt-in to bound LLM spend.
+    """
+    from eval.reference import score_reference_metrics
+    db = get_db()
+    _assert_episode_owned(db, episode_id, user_id)
+    context = (body or {}).get("context") if isinstance(body, dict) else None
+    result = score_reference_metrics(db, episode_id, context=context)
+    if result is None:
+        raise HTTPException(status_code=422, detail="Episode has no final output to ground reference metrics on")
+    return result
 
 
 @app.get("/episodes")
@@ -907,11 +1102,22 @@ def get_episode(
         .execute()
     )
 
+    # Peer-relative annotation (§2.3): where each score sits vs runs like it.
+    # Empty when the episode is unclustered or its cluster lacks a baseline —
+    # callers simply fall back to the absolute scores above.
+    try:
+        from eval.relative import relative_scores
+        relative = relative_scores(db, episode_id)
+    except Exception as exc:
+        log.warning(f"relative scoring failed for {episode_id}: {exc}")
+        relative = {}
+
     return JSONResponse(
         content={
             "episode": ep_resp.data[0],
             "steps"  : steps_resp.data or [],
             "scores" : score_resp.data or [],
+            "relative_scores": relative,
         },
         headers={"Cache-Control": "private, max-age=15"},
     )
@@ -996,31 +1202,6 @@ def recall_episodes_api(
         return {"episodes": rows}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recall search failed: {e}")
-
-
-@app.get("/compare")
-def compare_episodes_api(
-    episode_a: str = Query(...),
-    episode_b: str = Query(...),
-    user_id  : str = Depends(verify_api_key),
-):
-    """Diff two episodes."""
-    db = get_db()
-    _assert_episode_owned(db, episode_a, user_id)
-    _assert_episode_owned(db, episode_b, user_id)
-
-    ep_a_resp = db.table("episodes").select("*").eq("episode_id", episode_a).execute()
-    ep_b_resp = db.table("episodes").select("*").eq("episode_id", episode_b).execute()
-
-    steps_a_resp = db.table("episode_steps").select("*").eq("episode_id", episode_a).order("step_index").execute()
-    steps_b_resp = db.table("episode_steps").select("*").eq("episode_id", episode_b).order("step_index").execute()
-
-    return {
-        "episode_a": ep_a_resp.data[0] if ep_a_resp.data else None,
-        "episode_b": ep_b_resp.data[0] if ep_b_resp.data else None,
-        "steps_a"  : steps_a_resp.data or [],
-        "steps_b"  : steps_b_resp.data or [],
-    }
 
 
 @app.get("/similar")
@@ -1162,6 +1343,45 @@ def list_keys(user_id: str = Depends(verify_api_key)):
     return {"keys": resp.data or []}
 
 
+@app.post("/keys", status_code=201)
+def create_key(
+    body: RegisterRequest,
+    user_id: str = Depends(verify_api_key),
+):
+    """
+    Issue a new AGeval API key for the authenticated user.
+
+    This is how a signed-in user gets a key for their own agents: the dashboard
+    calls this with the user's session (Supabase JWT) and shows the returned
+    raw key ONCE. The key is scoped to the same user_id, so episodes the agent
+    records show up under the user's account. The raw key is never stored —
+    only its hash — so it cannot be shown again.
+    """
+    import secrets
+
+    db = get_db()
+    raw_key = f"ageval-sk-{secrets.token_hex(24)}"
+    key_hash = _hash_key(raw_key)
+
+    try:
+        db.table("api_keys").insert({
+            "key_hash" : key_hash,
+            "user_id"  : user_id,
+            "label"    : body.label or "default",
+            "is_active": True,
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create key: {e}")
+
+    log.info(f"API key issued for user={user_id} label='{body.label}'")
+    return {
+        "api_key": raw_key,
+        "user_id": user_id,
+        "label": body.label or "default",
+        "message": "Store this key now — it will not be shown again.",
+    }
+
+
 @app.post("/keys/rotate", status_code=201)
 def rotate_key(
     body: RegisterRequest,
@@ -1268,7 +1488,9 @@ def _assert_episode_owned(db, episode_id: str, user_id: str) -> None:
 from api.synthetic import router as synthetic_router
 from api.redteam import router as redteam_router
 from api.datasets import router as datasets_router
+from api.failures import router as failures_router
 
 app.include_router(synthetic_router)
 app.include_router(redteam_router)
 app.include_router(datasets_router)
+app.include_router(failures_router)

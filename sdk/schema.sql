@@ -47,6 +47,18 @@ alter table if exists api_keys
 alter table if exists episodes
     add column if not exists cluster_id uuid; -- foreign key added later
 
+-- episodes: episodic-memory deepening (EVAL_DEPTH_AND_MEMORY_PLAN §1.1)
+--   episode_fingerprint — stable hash of the tool-name sequence + outcome, so
+--                         identically-shaped runs group in O(1) (regression diff).
+--   parent_episode_id   — links retries/replays back to the run they re-ran.
+alter table if exists episodes
+    add column if not exists episode_fingerprint text;
+alter table if exists episodes
+    add column if not exists parent_episode_id  text;
+
+create index if not exists idx_episodes_fingerprint
+    on episodes (agent_id, episode_fingerprint);
+
 
 -- Drop the old trigger first so we can recreate it cleanly
 drop trigger if exists episode_jobs_updated_at on episode_jobs;
@@ -398,6 +410,123 @@ create index if not exists idx_dataset_test_cases_dataset
 
 
 -- ============================================================
+-- EVALUATION-MEMORY tables (EVAL_DEPTH_AND_MEMORY_PLAN Phase 1)
+--
+-- These three tables turn AGeval's memory from "similar tasks" into
+-- evaluation memory that makes scoring smarter the more episodes it sees:
+--   • failure_memory       — a library of how an agent fails (the moat)
+--   • failure_occurrences   — every episode that matched a failure signature
+--   • cluster_baselines     — per-cluster score distributions for peer-relative
+--                             scoring + statistical (confidence) scoring
+--
+-- All are RLS-scoped by user_id exactly like golden_datasets, and every
+-- consumer degrades gracefully (skip / 503) if the table is absent — the same
+-- pattern api/datasets.py already uses.
+-- ============================================================
+
+-- ---- failure-pattern memory -----------------------------------------
+-- One row per distinct failure signature for a (user, agent). A signature is
+-- a stable bucket of (error_category | failing tool | failure-position band).
+-- The centroid is the mean embedding of the failing episodes' error messages,
+-- reusing the existing 1536-d embedding path (no new vendor).
+create table if not exists failure_memory (
+    id                uuid        primary key default gen_random_uuid(),
+    user_id           text        not null,
+    agent_id          text        not null,
+    signature         text        not null,   -- error_category|tool|position-band
+    label             text,                   -- human/auto name, e.g. "inventory timeout"
+    centroid          vector(1536),           -- error-message embedding centroid
+    occurrences       int         not null default 0,
+    first_seen        timestamptz not null default now(),
+    last_seen         timestamptz not null default now(),
+    sample_episode_id text,
+    sample_error      text,                   -- a representative error message
+    created_at        timestamptz not null default now(),
+
+    unique (user_id, agent_id, signature)
+);
+
+create index if not exists idx_failure_memory_agent
+    on failure_memory (user_id, agent_id, last_seen desc);
+
+-- ---- failure occurrences --------------------------------------------
+-- The lifecycle log: which episodes matched which signature, and when. Lets
+-- the UI say "this signature appeared in 14 runs over 3 days" (recurrence).
+create table if not exists failure_occurrences (
+    id            uuid        primary key default gen_random_uuid(),
+    failure_id    uuid        not null references failure_memory(id) on delete cascade,
+    episode_id    text        not null,
+    step_index    int,
+    occurred_at   timestamptz not null default now(),
+
+    unique (failure_id, episode_id)
+);
+
+create index if not exists idx_failure_occurrences_failure
+    on failure_occurrences (failure_id, occurred_at desc);
+
+-- ---- per-cluster score baselines ------------------------------------
+-- Semantic memory upgraded from "similar tasks" to "calibrated expectations".
+-- One row per (cluster, scorer-or-metric): the score distribution of runs in
+-- that cluster. A new episode is then scored RELATIVE to its peers.
+create table if not exists cluster_baselines (
+    cluster_id   uuid        not null references episode_clusters(id) on delete cascade,
+    scorer       text        not null,   -- 'rules'|'llm_judge'|'custom'| metric name
+    n            int         not null,   -- sample size behind this baseline
+    mean         numeric     not null,
+    p10          numeric,
+    p50          numeric,
+    p90          numeric,
+    stddev       numeric,
+    updated_at   timestamptz not null default now(),
+
+    primary key (cluster_id, scorer)
+);
+
+-- ---- procedural memory (the "golden trajectory") --------------------
+-- Procedural memory (EVAL_DEPTH_AND_MEMORY_PLAN §1.3): for each task cluster,
+-- the canonical way the task *should* be done — the modal successful tool
+-- sequence mined from the cluster's highest-scoring episodes, plus the expected
+-- step count and tool set. A new run is then scored by how closely its tool
+-- sequence follows this golden path (trajectory_adherence), catching "wrong
+-- path, right answer". One row per cluster.
+create table if not exists procedural_memory (
+    cluster_id        uuid        not null references episode_clusters(id) on delete cascade,
+    user_id           text        not null,
+    agent_id          text        not null,
+    golden_sequence   jsonb       not null,   -- ordered list of tool names
+    expected_steps    numeric,                -- median meaningful-step count
+    expected_tools    jsonb,                  -- the set of tools a good run uses
+    n                 int         not null,    -- successful runs the golden path was mined from
+    sample_episode_id text,                    -- the exemplar episode
+    updated_at        timestamptz not null default now(),
+
+    primary key (cluster_id)
+);
+
+create index if not exists idx_procedural_memory_agent
+    on procedural_memory (user_id, agent_id);
+
+-- ---- drift alerts (online drift detection) --------------------------
+-- Online drift alerts (EVAL_DEPTH_AND_MEMORY_PLAN §2.6): one row per detected
+-- regression of a cluster's recent score below its baseline. Written by the
+-- drift sweep in the worker; read via GET /drift/alerts.
+create table if not exists drift_alerts (
+    id            uuid        primary key default gen_random_uuid(),
+    cluster_id    uuid        references episode_clusters(id) on delete cascade,
+    scorer        text        not null,
+    baseline_mean numeric,
+    recent_mean   numeric,
+    drop          numeric,
+    n_recent      int,
+    detected_at   timestamptz not null default now()
+);
+
+create index if not exists idx_drift_alerts_cluster
+    on drift_alerts (cluster_id, detected_at desc);
+
+
+-- ============================================================
 -- ROW LEVEL SECURITY (RLS) — v3
 --
 -- Enforces multi-tenant data isolation at the Postgres layer.
@@ -656,6 +785,84 @@ create policy dataset_test_cases_delete on dataset_test_cases
             select 1 from golden_datasets d
             where d.id = dataset_test_cases.dataset_id
               and d.user_id = current_user_id()
+        )
+    );
+
+
+-- ---- failure_memory -------------------------------------------------
+-- Written by the merger worker (service_role, bypasses RLS); read by users.
+alter table failure_memory enable row level security;
+
+drop policy if exists failure_memory_select on failure_memory;
+create policy failure_memory_select on failure_memory
+    for select using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists failure_memory_insert on failure_memory;
+create policy failure_memory_insert on failure_memory
+    for insert with check (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists failure_memory_update on failure_memory;
+create policy failure_memory_update on failure_memory
+    for update using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists failure_memory_delete on failure_memory;
+create policy failure_memory_delete on failure_memory
+    for delete using (user_id = current_user_id());
+
+
+-- ---- failure_occurrences --------------------------------------------
+-- Occurrences inherit ownership from their parent failure_memory row.
+alter table failure_occurrences enable row level security;
+
+drop policy if exists failure_occurrences_select on failure_occurrences;
+create policy failure_occurrences_select on failure_occurrences
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from failure_memory f
+            where f.id = failure_occurrences.failure_id
+              and f.user_id = current_user_id()
+        )
+    );
+
+
+-- ---- cluster_baselines ----------------------------------------------
+-- Baselines inherit ownership from their parent episode_clusters row.
+alter table cluster_baselines enable row level security;
+
+drop policy if exists cluster_baselines_select on cluster_baselines;
+create policy cluster_baselines_select on cluster_baselines
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from episode_clusters c
+            where c.id = cluster_baselines.cluster_id
+              and c.user_id = current_user_id()
+        )
+    );
+
+
+-- ---- procedural_memory ----------------------------------------------
+-- Written by the clustering job (service_role, bypasses RLS); read by users.
+alter table procedural_memory enable row level security;
+
+drop policy if exists procedural_memory_select on procedural_memory;
+create policy procedural_memory_select on procedural_memory
+    for select using (user_id = current_user_id() or current_user_id() = '');
+
+
+-- ---- drift_alerts ---------------------------------------------------
+-- Inherit ownership from the parent cluster.
+alter table drift_alerts enable row level security;
+
+drop policy if exists drift_alerts_select on drift_alerts;
+create policy drift_alerts_select on drift_alerts
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from episode_clusters c
+            where c.id = drift_alerts.cluster_id
+              and c.user_id = current_user_id()
         )
     );
 

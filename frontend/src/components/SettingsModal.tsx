@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { apiGet, getConfig } from '@/lib/api';
+import { getBaseUrl } from '@/lib/api';
 import { useToast } from './Toast';
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -12,9 +12,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [userInfo, setUserInfo] = useState<string | null>(null);
 
   useEffect(() => {
-    const cfg = getConfig();
-    setKey(cfg.key);
-    setUrl(cfg.base);
+    setKey(localStorage.getItem('ageval_key') || sessionStorage.getItem('ageval_key') || '');
+    setUrl(getBaseUrl());
     setRemember(!!localStorage.getItem('ageval_key'));
   }, []);
 

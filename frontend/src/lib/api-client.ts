@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getSupabase, supabaseConfigured } from './supabase';
 
 // Create a globally configured Axios instance
 export const apiClient = axios.create({
@@ -9,22 +10,32 @@ export const apiClient = axios.create({
   },
 });
 
-// Interceptor to attach the API key + base URL to all requests.
-// Credentials are shared with the rest of the app under a single key name
-// (`ageval_key` / `ageval_url`) so connecting once works everywhere. The old
-// `ageval_api_key` name is read as a fallback for in-flight sessions.
-apiClient.interceptors.request.use((config) => {
+// Interceptor to attach the bearer token + base URL to all requests.
+// Dashboard requests authenticate with the signed-in user's Supabase JWT;
+// a manually stored `ageval_key` is the fallback. Base URL defaults to local
+// dev unless overridden via `ageval_url`.
+apiClient.interceptors.request.use(async (config) => {
   if (typeof window !== 'undefined') {
-    const base =
-      localStorage.getItem('ageval_url') || sessionStorage.getItem('ageval_url');
+    const base = localStorage.getItem('ageval_url') || process.env.NEXT_PUBLIC_API_URL;
     if (base) {
       config.baseURL = base;
     }
 
-    const token =
-      localStorage.getItem('ageval_key') ||
-      sessionStorage.getItem('ageval_key') ||
-      localStorage.getItem('ageval_api_key'); // legacy fallback
+    let token: string | null = null;
+    if (supabaseConfigured) {
+      try {
+        const { data } = await getSupabase().auth.getSession();
+        token = data.session?.access_token || null;
+      } catch {
+        /* fall through to stored key */
+      }
+    }
+    if (!token) {
+      token =
+        localStorage.getItem('ageval_key') ||
+        sessionStorage.getItem('ageval_key') ||
+        localStorage.getItem('ageval_api_key'); // legacy fallback
+    }
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -90,16 +101,14 @@ export const keysApi = {
     const response = await apiClient.get('/keys');
     return response.data;
   },
-  
-  registerKey: async (label: string, adminSecret: string) => {
-    const response = await apiClient.post('/register', { label }, {
-      headers: {
-        'x-admin-secret': adminSecret
-      }
-    });
+
+  // Issue a new agent API key for the signed-in user (session-gated; no admin
+  // secret). The raw key is returned once.
+  createKey: async (label: string) => {
+    const response = await apiClient.post('/keys', { label });
     return response.data;
   },
-  
+
   revokeKey: async (keyId: string) => {
     const response = await apiClient.delete(`/keys/${keyId}`);
     return response.data;

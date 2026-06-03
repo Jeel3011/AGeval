@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   Sparkles,
   TerminalSquare,
+  TrendingDown,
   Users,
 } from "lucide-react";
 
@@ -42,6 +43,10 @@ export function Sidebar() {
         <NavItem href="/clusters" icon={<GitCompare size={18} />} label="Clusters" active={pathname.startsWith("/clusters")} />
         <NavItem href="/recall" icon={<Search size={18} />} label="Semantic Recall" active={pathname.startsWith("/recall")} />
         <NavItem href="/compare" icon={<GitCompare size={18} />} label="Compare" active={pathname.startsWith("/compare")} />
+
+        <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Memory</div>
+        <NavItem href="/failures" icon={<ShieldAlert size={18} />} label="Failure Memory" active={pathname.startsWith("/failures")} />
+        <NavItem href="/regression" icon={<TrendingDown size={18} />} label="Regression" active={pathname.startsWith("/regression")} />
 
         <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Evaluation</div>
         <NavItem href="/datasets" icon={<Database size={18} />} label="Golden Datasets" active={pathname.startsWith("/datasets")} />

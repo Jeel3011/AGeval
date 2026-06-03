@@ -225,5 +225,27 @@ def _cluster_for_agent(client, user_id: str, agent_id: str):
             batch = ep_ids[i:i+50]
             client.table("episodes").update({"cluster_id": cluster_id}).in_("episode_id", batch).execute()
 
+        # Recompute peer-relative score baselines for this cluster (§1.2).
+        # Best-effort: a missing table or failure here never aborts clustering.
+        try:
+            from merger.baselines import compute_baselines
+            compute_baselines(client, cluster_id, ep_ids)
+        except Exception as e:
+            log.warning(f"cluster_baselines computation failed for cluster {cluster_id}: {e}")
+
+        # Mine the golden trajectory for this cluster (§1.3), then score each
+        # member's adherence to it now that the golden path exists. Best-effort.
+        try:
+            from merger.procedural import mine_golden_trajectory
+            if mine_golden_trajectory(client, cluster_id, user_id, agent_id, ep_ids):
+                from eval.trajectory import score_trajectory_adherence
+                for eid in ep_ids:
+                    try:
+                        score_trajectory_adherence(client, eid)
+                    except Exception as te:
+                        log.debug(f"trajectory scoring failed for {eid}: {te}")
+        except Exception as e:
+            log.warning(f"procedural_memory mining failed for cluster {cluster_id}: {e}")
+
     # Old clusters that were not matched can be ignored or deleted
     # We will leave them for drift detection history, or they could be deleted if episode_count = 0.

@@ -1,5 +1,6 @@
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel
-from typing import List, Optional, Any, Dict
 
 # ---------------------------------------------------------------------------
 # Dataset Schemas
@@ -23,6 +24,26 @@ class DatasetResponse(BaseModel):
     version: str
     test_case_count: int
     last_updated: str
+
+# ---------------------------------------------------------------------------
+# Failure-pattern memory schemas (EVAL_DEPTH_AND_MEMORY_PLAN §1.4 / §2.2)
+# ---------------------------------------------------------------------------
+
+class FailureSignatureResponse(BaseModel):
+    id: str
+    agent_id: str
+    signature: str
+    label: Optional[str] = None
+    occurrences: int
+    first_seen: Optional[str] = None
+    last_seen: Optional[str] = None
+    sample_episode_id: Optional[str] = None
+    sample_error: Optional[str] = None
+
+class GenerateEvalRequest(BaseModel):
+    project_id: str
+    # Optional override; otherwise a name is derived from the signature label.
+    dataset_name: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # Job & Task Schemas

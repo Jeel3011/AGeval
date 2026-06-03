@@ -269,6 +269,36 @@ def _deliver_webhooks(client, episode_id: str, score_val: float):
         log.warning(f"Failed to deliver webhooks for {episode_id}: {e}")
 
 
+def _record_failure_memory(client, episode_id: str, agent_id: str):
+    """Fold a merged episode's failing steps into failure-pattern memory.
+
+    Looks up the episode's owner and steps, then delegates to
+    merger.failure_memory.record_failures. Best-effort and self-contained so a
+    missing table or embedding outage never disturbs the merge/score path.
+    """
+    from merger.failure_memory import record_failures
+
+    ep_resp = (
+        client.table("episodes")
+        .select("user_id")
+        .eq("episode_id", episode_id)
+        .limit(1)
+        .execute()
+    )
+    user_id = (ep_resp.data or [{}])[0].get("user_id") if ep_resp.data else None
+
+    steps_resp = (
+        client.table("episode_steps")
+        .select("step_index, tool_name, success, error_category, error_message")
+        .eq("episode_id", episode_id)
+        .order("step_index")
+        .execute()
+    )
+    steps = steps_resp.data or []
+
+    record_failures(client, episode_id, agent_id, user_id, steps)
+
+
 def process_job(client, job: dict):
     job_id      = job["id"]
     episode_id  = job["episode_id"]
@@ -330,6 +360,13 @@ def process_job(client, job: dict):
             except Exception as judge_exc:
                 log.warning(f"LLM judge failed for {episode_id}: {judge_exc}")
 
+            # Failure-pattern memory (§1.4): fold this run's failing steps into
+            # the agent's failure-signature library. Never kills the job.
+            try:
+                _record_failure_memory(client, episode_id, agent_id)
+            except Exception as fm_exc:
+                log.warning(f"failure_memory recording failed for {episode_id}: {fm_exc}")
+
             # Webhook delivery with retry and audit
             _deliver_webhooks(client, episode_id, score_val)
 
@@ -370,9 +407,14 @@ def run():
         if poll_cycle % RECLAIM_EVERY_N == 0:
             reclaim_stale_jobs(client)
 
-        # Periodically run clustering
+        # Periodically run clustering, then sweep for cohort drift (§2.6).
         if poll_cycle % CLUSTER_EVERY_N == 0:
             run_clustering(client)
+            try:
+                from merger.drift import run_drift_alerts
+                run_drift_alerts(client, scorer="custom")
+            except Exception as drift_exc:
+                log.warning(f"drift sweep failed: {drift_exc}")
 
         job = pick_job(client)
 

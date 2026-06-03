@@ -4,7 +4,9 @@ import { apiGet } from '@/lib/api';
 import { useToast } from '@/components/Toast';
 import { scoreColor, outcomeClass, fmtLatency } from '@/lib/utils';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { CheckCircle, XCircle, ArrowLeftRight } from 'lucide-react';
+import { CheckCircle, XCircle, ArrowLeftRight, GitCompare } from 'lucide-react';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { PageContainer, EmptyState } from '@/components/ui/EmptyState';
 
 function CompareContent() {
   const searchParams = useSearchParams();
@@ -37,14 +39,19 @@ function CompareContent() {
     }
   }, [epA, epB]);
 
+  const [diff, setDiff] = useState<any>(null);
+
   const loadCompare = async (a: string, b: string) => {
     setLoading(true);
     try {
-      const [detA, detB] = await Promise.all([
+      const [detA, detB, cmp] = await Promise.all([
         apiGet(`/episodes/${encodeURIComponent(a)}`),
-        apiGet(`/episodes/${encodeURIComponent(b)}`)
+        apiGet(`/episodes/${encodeURIComponent(b)}`),
+        // Real backend pairwise diff (§2.4): LCS path alignment + optional LLM verdict.
+        apiGet(`/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`).catch(() => null),
       ]);
       setData({ a: detA, b: detB });
+      setDiff(cmp);
     } catch (err: any) {
       toast(err.message, 'error');
     } finally {
@@ -124,54 +131,83 @@ function CompareContent() {
   const rulesB = data?.b?.scores?.find((s:any)=>s.scorer==='rules')?.score;
 
   return (
-    <div>
-      <header style={{marginBottom: 24}}>
-        <h1 style={{margin:0, fontSize:24, fontWeight:600}}>Compare Episodes</h1>
-      </header>
+    <PageContainer>
+      <PageHeader
+        kicker="Episodes"
+        title="Compare Episodes"
+        lede="Two runs, side by side — aligned tool trajectories, score deltas, and an optional judge verdict."
+      />
 
-      <div style={{display:'flex', gap:16, alignItems:'center', marginBottom:24}}>
-        <div style={{flex:1}}>
-          <label style={{display:'block', marginBottom:8, fontSize:14, fontWeight:500, color:'var(--text-muted)'}}>Episode A</label>
-          <select className="input" value={epA} onChange={e => setEpA(e.target.value)}>
-            <option value="">Select an episode...</option>
+      <div className="flex items-end gap-4 mb-6">
+        <div className="flex-1">
+          <label className="block mb-1.5 text-[13px] font-medium text-zinc-500">Episode A</label>
+          <select className="w-full h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm outline-none focus:border-zinc-400 transition" value={epA} onChange={e => setEpA(e.target.value)}>
+            <option value="">Select an episode…</option>
             {recentEps.map(e => <option key={e.episode_id} value={e.episode_id}>{e.task} ({e.episode_id})</option>)}
           </select>
         </div>
-        
-        <button className="btn-ghost" style={{padding:8, borderRadius:'var(--radius-sm)', marginTop:24}} onClick={handleSwap} title="Swap A and B">
+
+        <button className="inline-flex items-center justify-center h-10 w-10 rounded-lg border border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 transition-colors" onClick={handleSwap} title="Swap A and B">
           <ArrowLeftRight size={16} />
         </button>
 
-        <div style={{flex:1}}>
-          <label style={{display:'block', marginBottom:8, fontSize:14, fontWeight:500, color:'var(--text-muted)'}}>Episode B</label>
-          <select className="input" value={epB} onChange={e => setEpB(e.target.value)}>
-            <option value="">Select an episode...</option>
+        <div className="flex-1">
+          <label className="block mb-1.5 text-[13px] font-medium text-zinc-500">Episode B</label>
+          <select className="w-full h-10 rounded-lg border border-zinc-200 bg-white px-3 text-sm outline-none focus:border-zinc-400 transition" value={epB} onChange={e => setEpB(e.target.value)}>
+            <option value="">Select an episode…</option>
             {recentEps.map(e => <option key={e.episode_id} value={e.episode_id}>{e.task} ({e.episode_id})</option>)}
           </select>
         </div>
       </div>
 
       {loading ? (
-        <div className="skeleton" style={{height: 400}} />
+        <div className="ed-card h-96 animate-pulse bg-zinc-50/60" />
       ) : data ? (
-        <div className="card" style={{padding:0, overflow:'hidden'}}>
-          <div style={{display:'flex', borderBottom:'1px solid var(--border)', background:'rgba(255,255,255,0.02)'}}>
-            <div style={{flex:1, padding:24, borderRight:'1px solid var(--border)'}}>
-              <div style={{fontSize:13, color:'var(--text-muted)'}}>Episode A Score</div>
-              <div style={{fontSize:28, fontWeight:600, color: scoreColor(rulesA)}}>{rulesA != null ? `${Math.round(rulesA*100)}%` : 'N/A'}</div>
-              <div style={{marginTop:8}}>
-                 <span className={`badge badge-${outcomeClass(data.a.episode.outcome)}`}>{data.a.episode.outcome}</span>
-              </div>
+        <div className="ed-card overflow-hidden p-0">
+          <div className="flex border-b border-zinc-200 bg-zinc-50/60">
+            <div className="flex-1 p-6 border-r border-zinc-200">
+              <div className="ed-kicker mb-1">Episode A score</div>
+              <div className="ed-stat text-3xl" style={{ color: scoreColor(rulesA) }}>{rulesA != null ? `${Math.round(rulesA*100)}%` : 'N/A'}</div>
+              <div className="mt-2"><span className={`badge badge-${outcomeClass(data.a.episode.outcome)}`}>{data.a.episode.outcome}</span></div>
             </div>
-            <div style={{flex:1, padding:24}}>
-              <div style={{fontSize:13, color:'var(--text-muted)'}}>Episode B Score</div>
-              <div style={{fontSize:28, fontWeight:600, color: scoreColor(rulesB)}}>{rulesB != null ? `${Math.round(rulesB*100)}%` : 'N/A'}</div>
-              <div style={{marginTop:8}}>
-                 <span className={`badge badge-${outcomeClass(data.b.episode.outcome)}`}>{data.b.episode.outcome}</span>
-              </div>
+            <div className="flex-1 p-6">
+              <div className="ed-kicker mb-1">Episode B score</div>
+              <div className="ed-stat text-3xl" style={{ color: scoreColor(rulesB) }}>{rulesB != null ? `${Math.round(rulesB*100)}%` : 'N/A'}</div>
+              <div className="mt-2"><span className={`badge badge-${outcomeClass(data.b.episode.outcome)}`}>{data.b.episode.outcome}</span></div>
             </div>
           </div>
           
+          {/* Pairwise diff from the backend (§2.4): path alignment, deltas, verdict */}
+          {diff && (
+            <div style={{padding:24, borderBottom:'1px solid var(--border)', display:'flex', flexDirection:'column', gap:16}}>
+              {diff.llm_verdict && (
+                <div style={{padding:12, border:'1px solid var(--accent)', borderRadius:'var(--radius-sm)', fontSize:13}}>
+                  <b style={{textTransform:'uppercase'}}>Judge verdict: {diff.llm_verdict.winner === 'tie' ? 'tie' : `Episode ${diff.llm_verdict.winner.toUpperCase()} wins`}</b>
+                  <div style={{color:'var(--text-muted)', marginTop:4}}>{diff.llm_verdict.reasoning}</div>
+                </div>
+              )}
+              <div style={{display:'flex', gap:24, flexWrap:'wrap', fontSize:13}}>
+                <span style={{color:'var(--text-muted)'}}>Edit distance: <b style={{color:'var(--text)'}}>{diff.edit_distance}</b></span>
+                <span style={{color:'var(--text-muted)'}}>Step delta: <b style={{color:'var(--text)'}}>{diff.step_delta > 0 ? '+' : ''}{diff.step_delta}</b></span>
+                {Object.entries(diff.score_deltas || {}).map(([s, d]: [string, any]) => (
+                  <span key={s} style={{color:'var(--text-muted)'}}>{s}: <b style={{color: d.delta == null ? 'var(--text-muted)' : d.delta < 0 ? 'var(--danger)' : d.delta > 0 ? 'var(--success)' : 'var(--text)'}}>{d.delta == null ? '—' : `${d.delta >= 0 ? '+' : ''}${d.delta.toFixed(2)}`}</b></span>
+                ))}
+              </div>
+              {/* Tool-sequence alignment */}
+              <div style={{display:'flex', flexWrap:'wrap', gap:6, alignItems:'center'}}>
+                {(diff.sequence_diff || []).map((op: any, i: number) => {
+                  const color = op.op === 'same' ? 'var(--text-muted)' : op.op === 'a_only' ? 'var(--danger)' : 'var(--success)';
+                  const prefix = op.op === 'a_only' ? '− ' : op.op === 'b_only' ? '+ ' : '';
+                  return (
+                    <span key={i} style={{fontFamily:'monospace', fontSize:11, padding:'2px 6px', borderRadius:4, border:`1px solid ${color}`, color}}>
+                      {prefix}{op.tool}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div style={{display:'flex'}}>
             <div style={{flex:1, padding:24, borderRight:'1px solid var(--border)', overflowY:'auto', maxHeight:600}}>
               {renderTimeline(data.a.steps, expandedA, setExpandedA, divergeIdx)}
@@ -182,17 +218,19 @@ function CompareContent() {
           </div>
         </div>
       ) : (
-        <div style={{padding:40, textAlign:'center', color:'var(--text-muted)', border:'1px dashed var(--border)', borderRadius:'var(--radius-md)'}}>
-          Select two episodes above to compare them side-by-side.
-        </div>
+        <EmptyState
+          icon={<GitCompare size={26} />}
+          title="Pick two episodes"
+          hint="Choose Episode A and Episode B above to align their trajectories and see exactly where they diverge."
+        />
       )}
-    </div>
+    </PageContainer>
   );
 }
 
 export default function ComparePage() {
   return (
-    <Suspense fallback={<div className="skeleton" style={{height: 400}} />}>
+    <Suspense fallback={<div className="px-8 py-8"><div className="ed-card h-96 animate-pulse bg-zinc-50/60" /></div>}>
       <CompareContent />
     </Suspense>
   );

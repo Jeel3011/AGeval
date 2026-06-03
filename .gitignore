@@ -27,5 +27,6 @@ sdk/produce_realistic_trace.py
 merger/test_merger.py
 eval/test_rules.py
 PRODUCT_AUDIT.md
+plans
 
 
