@@ -491,6 +491,170 @@ def reasoning_action_alignment(steps: list[dict], episode: dict) -> float:
 
 
 # ---------------------------------------------------------------------------
+# ── Deep evaluation metrics (v2) ────────────────────────────────────────────
+# A second tier of deterministic metrics that probe behaviours the first tier
+# misses: resilience, failure shape, exploration balance, cost-to-outcome, and
+# behavioural stability. All are pure functions of the recorded steps, bounded
+# to [0,1], and 1.0 = "good".
+# ---------------------------------------------------------------------------
+
+def _meaningful(steps: list[dict]) -> list[dict]:
+    """Steps that represent real tool work (exclude llm_call bookkeeping)."""
+    tools = [s for s in steps if s.get("tool_name") != "llm_call"]
+    return tools or steps
+
+
+def _total_tokens(steps: list[dict]) -> int:
+    total = 0
+    for s in steps:
+        out = s.get("tool_output")
+        if isinstance(out, dict):
+            total += (out.get("input_tokens") or 0) + (out.get("output_tokens") or 0)
+    return total
+
+
+@register_metric(
+    "recovery_success_rate",
+    weight=0.0,
+    description="Of the steps that immediately FOLLOW a failure, what fraction "
+                "succeed? Directly measures whether the agent recovers after it "
+                "stumbles. 1.0 = always recovers next step; 0.0 = never does.",
+)
+def recovery_success_rate(steps: list[dict], episode: dict) -> float:
+    s = sorted(steps, key=_idx)
+    after_fail = [s[i] for i in range(1, len(s)) if not s[i - 1].get("success")]
+    if not after_fail:
+        return 1.0  # nothing to recover from
+    recovered = sum(1 for st in after_fail if st.get("success"))
+    return round(recovered / len(after_fail), 4)
+
+
+@register_metric(
+    "failure_clustering",
+    weight=0.0,
+    description="Are failures isolated (transient blips) or clustered into long "
+                "stuck stretches? 1.0 = no consecutive failures; lower = the agent "
+                "got stuck failing repeatedly in a row.",
+)
+def failure_clustering(steps: list[dict], episode: dict) -> float:
+    s = sorted(steps, key=_idx)
+    fails = [not st.get("success") for st in s]
+    n_fail = sum(fails)
+    if n_fail <= 1:
+        return 1.0
+    consecutive = sum(1 for i in range(1, len(fails)) if fails[i] and fails[i - 1])
+    # Worst case: every failure but the first is consecutive (n_fail-1 pairs).
+    return round(1.0 - consecutive / (n_fail - 1), 4)
+
+
+@register_metric(
+    "tool_selection_entropy",
+    weight=0.0,
+    description="How evenly the agent spread its work across the tools it used "
+                "(normalised Shannon entropy). 1.0 = balanced exploration; near "
+                "0.0 = hammered a single tool. Single-tool tasks score 1.0.",
+)
+def tool_selection_entropy(steps: list[dict], episode: dict) -> float:
+    import math
+    names = [s.get("tool_name") for s in _meaningful(steps) if s.get("tool_name")]
+    if not names:
+        return 0.0
+    counts: dict[str, int] = {}
+    for n in names:
+        counts[n] = counts.get(n, 0) + 1
+    k = len(counts)
+    if k <= 1:
+        return 1.0  # only one tool available/used → trivially "balanced"
+    total = len(names)
+    entropy = -sum((c / total) * math.log(c / total) for c in counts.values())
+    return round(entropy / math.log(k), 4)  # normalise to [0,1]
+
+
+@register_metric(
+    "progress_monotonicity",
+    weight=0.0,
+    description="Does the agent move forward instead of re-touching tools it has "
+                "already succeeded with? 1.0 = no rework; lower = the agent "
+                "revisited already-solved tools (thrashing / forgetting).",
+)
+def progress_monotonicity(steps: list[dict], episode: dict) -> float:
+    s = sorted(steps, key=_idx)
+    meaningful = [st for st in s if st.get("tool_name") != "llm_call"] or s
+    if len(meaningful) <= 1:
+        return 1.0
+    succeeded: set[str] = set()
+    rework = 0
+    for st in meaningful:
+        name = st.get("tool_name")
+        if name in succeeded:
+            rework += 1
+        if st.get("success"):
+            succeeded.add(name)
+    return round(1.0 - rework / len(meaningful), 4)
+
+
+@register_metric(
+    "cost_per_success",
+    weight=0.0,
+    description="Token efficiency RELATIVE TO OUTCOMES: tokens spent per "
+                "successful tool step. 1.0 = lean (≤1k tokens/success), decaying "
+                "to 0.0 at ≥20k. 1.0 when no token usage was recorded.",
+)
+def cost_per_success(steps: list[dict], episode: dict) -> float:
+    tokens = _total_tokens(steps)
+    if tokens == 0:
+        return 1.0  # nothing to penalise
+    successes = sum(1 for s in _meaningful(steps) if s.get("success"))
+    if successes == 0:
+        return 0.0  # burned tokens, achieved nothing
+    per = tokens / successes
+    if per <= 1_000:
+        return 1.0
+    if per >= 20_000:
+        return 0.0
+    return round(1.0 - (per - 1_000) / 19_000, 4)
+
+
+@register_metric(
+    "latency_consistency",
+    weight=0.0,
+    description="How stable per-step latency is (1 - normalised coefficient of "
+                "variation). 1.0 = steady, predictable timing; low = erratic "
+                "(some calls hang), which often signals an unstable agent/env.",
+)
+def latency_consistency(steps: list[dict], episode: dict) -> float:
+    lat = [(s.get("latency_ms") or 0) for s in steps if s.get("latency_ms") is not None]
+    lat = [x for x in lat if x > 0]
+    if len(lat) <= 1:
+        return 1.0
+    mean = sum(lat) / len(lat)
+    if mean == 0:
+        return 1.0
+    var = sum((x - mean) ** 2 for x in lat) / len(lat)
+    cv = (var ** 0.5) / mean  # coefficient of variation
+    return round(max(0.0, 1.0 - min(cv, 1.0)), 4)
+
+
+@register_metric(
+    "error_concentration",
+    weight=0.0,
+    description="When errors happen, are they concentrated in ONE faulty tool "
+                "(diagnosable) or smeared across many (systemic)? 1.0 = no errors "
+                "or all from a single tool; lower = errors spread across tools.",
+)
+def error_concentration(steps: list[dict], episode: dict) -> float:
+    failed = [s for s in steps if not s.get("success")]
+    if not failed:
+        return 1.0
+    by_tool: dict[str, int] = {}
+    for s in failed:
+        t = s.get("tool_name") or "unknown"
+        by_tool[t] = by_tool.get(t, 0) + 1
+    # Concentration = share of the single worst tool among all failures.
+    return round(max(by_tool.values()) / len(failed), 4)
+
+
+# ---------------------------------------------------------------------------
 # Scoring function that combines built-in + custom metrics
 # ---------------------------------------------------------------------------
 def score_with_custom_metrics(

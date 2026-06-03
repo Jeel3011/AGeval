@@ -133,6 +133,12 @@ def trace_openai(
             choice = response.choices[0]
             assistant_msg = choice.message
 
+            # Token usage — recorded into the llm_call step so the cost-aware
+            # metrics (token_economy) work for OpenAI agents, not just Anthropic.
+            usage = getattr(response, "usage", None)
+            in_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+            out_tokens = getattr(usage, "completion_tokens", None) if usage else None
+
             # Reasoning attribution: when an OpenAI model emits tool_calls, the
             # `content` field on that same message is almost always null/empty —
             # the model puts its rationale in the *previous* assistant turn (or
@@ -159,6 +165,8 @@ def trace_openai(
                         if assistant_msg.tool_calls
                         else 0
                     ),
+                    "input_tokens": in_tokens,
+                    "output_tokens": out_tokens,
                 },
                 success=True,
                 reasoning=assistant_msg.content,

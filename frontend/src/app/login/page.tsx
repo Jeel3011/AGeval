@@ -24,7 +24,7 @@ export default function LoginPage() {
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       localStorage.setItem("ageval_key", apiKey.trim());
       localStorage.setItem("ageval_url", apiUrl.trim());
-      router.push("/");
+      router.push("/dashboard");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Connection failed — check your key and URL.");
     } finally {

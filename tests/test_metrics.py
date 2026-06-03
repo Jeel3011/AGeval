@@ -412,3 +412,96 @@ class TestBacktrackCostMetrics:
             {"tool_name": "search", "success": True, "reasoning": "go"},
         ]
         assert reasoning_action_alignment(steps, {}) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Deep evaluation metrics (v2)
+# ---------------------------------------------------------------------------
+class TestDeepMetrics:
+    def _g(self, name, steps, episode=None):
+        return get_metric(name)(steps, episode or {})
+
+    def test_recovery_success_rate(self):
+        # fail → success → fail → fail : two "after a failure" steps, one recovers
+        steps = [
+            {"tool_name": "a", "success": False},
+            {"tool_name": "a", "success": True},
+            {"tool_name": "b", "success": False},
+            {"tool_name": "b", "success": False},
+        ]
+        assert self._g("recovery_success_rate", steps) == 0.5
+
+    def test_recovery_success_rate_nothing_to_recover(self):
+        steps = [{"tool_name": "a", "success": True}, {"tool_name": "b", "success": True}]
+        assert self._g("recovery_success_rate", steps) == 1.0
+
+    def test_failure_clustering_isolated_vs_clustered(self):
+        clustered = [{"tool_name": "x", "success": False} for _ in range(3)]
+        assert self._g("failure_clustering", clustered) == 0.0
+        isolated = [
+            {"tool_name": "x", "success": False},
+            {"tool_name": "y", "success": True},
+            {"tool_name": "z", "success": False},
+        ]
+        assert self._g("failure_clustering", isolated) == 1.0
+
+    def test_tool_selection_entropy(self):
+        balanced = [{"tool_name": t, "success": True} for t in ["a", "b", "c", "a", "b", "c"]]
+        assert self._g("tool_selection_entropy", balanced) == 1.0
+        single = [{"tool_name": "a", "success": True} for _ in range(5)]
+        assert self._g("tool_selection_entropy", single) == 1.0  # one tool → trivially balanced
+        skewed = [{"tool_name": "a", "success": True}] * 9 + [{"tool_name": "b", "success": True}]
+        assert self._g("tool_selection_entropy", skewed) < 0.6
+
+    def test_progress_monotonicity(self):
+        thrash = [{"tool_name": "a", "success": True} for _ in range(3)]
+        assert self._g("progress_monotonicity", thrash) < 0.5
+        forward = [{"tool_name": t, "success": True} for t in ["a", "b", "c"]]
+        assert self._g("progress_monotonicity", forward) == 1.0
+
+    def test_cost_per_success(self):
+        # no tokens recorded → 1.0
+        assert self._g("cost_per_success", [{"tool_name": "a", "success": True}]) == 1.0
+        # lean: 500 tokens, 1 success
+        lean = [{"tool_name": "llm_call", "success": True,
+                 "tool_output": {"input_tokens": 400, "output_tokens": 100}},
+                {"tool_name": "a", "success": True}]
+        assert self._g("cost_per_success", lean) == 1.0
+        # tokens burned, zero successes → 0.0
+        burned = [{"tool_name": "llm_call", "success": True,
+                   "tool_output": {"input_tokens": 5000, "output_tokens": 5000}},
+                  {"tool_name": "a", "success": False}]
+        assert self._g("cost_per_success", burned) == 0.0
+
+    def test_latency_consistency(self):
+        steady = [{"tool_name": "a", "success": True, "latency_ms": 100} for _ in range(4)]
+        assert self._g("latency_consistency", steady) == 1.0
+        erratic = [
+            {"tool_name": "a", "success": True, "latency_ms": 10},
+            {"tool_name": "a", "success": True, "latency_ms": 5000},
+        ]
+        assert self._g("latency_consistency", erratic) < 0.5
+
+    def test_error_concentration(self):
+        assert self._g("error_concentration", [{"tool_name": "a", "success": True}]) == 1.0
+        one_tool = [{"tool_name": "x", "success": False} for _ in range(4)]
+        assert self._g("error_concentration", one_tool) == 1.0
+        spread = [
+            {"tool_name": "a", "success": False},
+            {"tool_name": "b", "success": False},
+            {"tool_name": "c", "success": False},
+            {"tool_name": "d", "success": False},
+        ]
+        assert self._g("error_concentration", spread) == 0.25
+
+    def test_all_deep_metrics_bounded(self):
+        from ageval.metrics import list_metrics
+        steps = [
+            {"tool_name": "llm_call", "success": True, "latency_ms": None,
+             "tool_output": {"input_tokens": 10, "output_tokens": 5}},
+            {"tool_name": "a", "success": False, "latency_ms": 50, "error_category": "env_error"},
+            {"tool_name": "a", "success": True, "latency_ms": 60},
+        ]
+        for m in list_metrics():
+            v = get_metric(m["name"])(steps, {"total_steps": 3})
+            assert 0.0 <= v <= 1.0, f"{m['name']}={v} out of range"

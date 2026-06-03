@@ -196,19 +196,30 @@ def fetch_steps(client, episode_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 def derive_outcome(steps: list[dict]) -> str:
     """
-    Simple rule-based outcome from steps.
+    Rule-based outcome from steps.
 
-    Rules (in order):
-      - No steps at all         → "failure" (nothing ran)
-      - All steps succeeded     → "success"
-      - All steps failed        → "failure"
-      - Mixed                   → "partial"
+    Outcome is judged on the agent's *meaningful* tool work, NOT on the
+    ``llm_call`` bookkeeping steps that the OpenAI/Anthropic tracers record.
+    Those LLM steps almost always "succeed" (a model reply came back), so
+    counting them would dilute every episode toward "partial"/"success" and
+    we'd never flag a genuinely failing tool-using agent — defeating the
+    point of the platform. We therefore exclude them when any real tool step
+    exists, and fall back to all steps only when an episode is LLM-only.
+
+    Rules (over the judged steps):
+      - No steps at all        → "failure" (nothing ran)
+      - All steps succeeded    → "success"
+      - All steps failed       → "failure"
+      - Mixed                  → "partial"
     """
     if not steps:
         return "failure"
 
-    successes = sum(1 for s in steps if s.get("success"))
-    failures  = len(steps) - successes
+    meaningful = [s for s in steps if s.get("tool_name") != "llm_call"]
+    judged = meaningful or steps  # LLM-only episode → judge on what we have
+
+    successes = sum(1 for s in judged if s.get("success"))
+    failures  = len(judged) - successes
 
     if failures == 0:
         return "success"

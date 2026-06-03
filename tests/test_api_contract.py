@@ -244,6 +244,34 @@ class TestMergerNoLangSmith:
         steps = [{"success": True}, {"success": False}]
         assert derive_outcome(steps) == "partial"
 
+    def test_derive_outcome_ignores_llm_call_bookkeeping(self):
+        """llm_call steps (always 'succeed') must NOT dilute a failing
+        tool-using agent into success/partial. An agent whose every real tool
+        call fails is a failure, even though its llm_call steps succeeded."""
+        from merger.merger import derive_outcome
+        steps = [
+            {"tool_name": "llm_call", "success": True},
+            {"tool_name": "reconcile", "success": False},
+            {"tool_name": "llm_call", "success": True},
+            {"tool_name": "reconcile", "success": False},
+        ]
+        assert derive_outcome(steps) == "failure"
+
+    def test_derive_outcome_success_with_llm_calls(self):
+        from merger.merger import derive_outcome
+        steps = [
+            {"tool_name": "llm_call", "success": True},
+            {"tool_name": "get_customer", "success": True},
+            {"tool_name": "llm_call", "success": True},
+        ]
+        assert derive_outcome(steps) == "success"
+
+    def test_derive_outcome_llm_only_episode_falls_back(self):
+        """An LLM-only episode (no tool steps) is still judged on its steps."""
+        from merger.merger import derive_outcome
+        assert derive_outcome([{"tool_name": "llm_call", "success": True}]) == "success"
+        assert derive_outcome([{"tool_name": "llm_call", "success": False}]) == "failure"
+
     def test_build_summary_works_without_trace(self):
         """build_summary must not crash when trace=None (non-LangSmith path)."""
         from merger.merger import build_summary

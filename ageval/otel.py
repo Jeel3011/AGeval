@@ -56,7 +56,7 @@ def export_episode(episode: dict, steps: list[dict]):
 
         for step in steps:
             tool_name = step.get("tool_name", "unknown")
-            latency = step.get("latency_ms", 0)
+            latency = step.get("latency_ms") or 0  # latency_ms may be present-but-None
 
             with _otel_tracer.start_as_current_span(
                 name=f"agent.tool.{tool_name}",

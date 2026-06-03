@@ -47,12 +47,14 @@ from datetime import datetime, timezone
 log = logging.getLogger(__name__)
 
 DEFAULT_WEIGHTS = {
-    "task_completion"      : 0.25,
-    "reasoning_quality"    : 0.15,
+    "task_completion"      : 0.20,
+    "reasoning_quality"    : 0.12,
     "error_handling"       : 0.10,
-    "output_quality"       : 0.15,
-    "hallucination_free"   : 0.20,   # 1.0 = no unsupported claims
-    "instruction_following": 0.15,   # 1.0 = stayed within the user's constraints
+    "output_quality"       : 0.13,
+    "hallucination_free"   : 0.17,   # 1.0 = no unsupported claims
+    "instruction_following": 0.12,   # 1.0 = stayed within the user's constraints
+    "efficiency"           : 0.08,   # 1.0 = reached the goal with no wasted steps
+    "tool_appropriateness" : 0.08,   # 1.0 = picked the right tool for each subtask
 }
 METRIC_KEYS = list(DEFAULT_WEIGHTS.keys())
 
@@ -151,7 +153,7 @@ def _build_prompt(episode: dict, steps: list[dict]) -> str:
 {output_section}
 
 ## Your Task
-Score the agent on these four dimensions. Be strict and honest.
+Score the agent on these eight dimensions. Be strict and honest.
 
 1. **task_completion** (0.0–1.0): Did the agent complete the task it was given?
    - 1.0 = fully completed
@@ -187,6 +189,17 @@ Score the agent on these four dimensions. Be strict and honest.
    - 0.5 = drifted from some constraints
    - 0.0 = ignored the task's constraints
 
+7. **efficiency** (0.0–1.0): Did the agent reach the goal without wasted work?
+   - 1.0 = no redundant, repeated, or unnecessary tool calls; a direct path
+   - 0.5 = some avoidable detours or repeated calls
+   - 0.0 = looping, thrashing, or many wasted steps relative to the task
+
+8. **tool_appropriateness** (0.0–1.0): Did the agent pick the RIGHT tool for
+   each subtask (vs forcing the wrong tool or ignoring a better one)?
+   - 1.0 = every tool choice was the sensible one for that step
+   - 0.5 = mostly sensible, with some questionable choices
+   - 0.0 = consistently wrong tool selection
+
 ## Response Format (JSON only — no other text)
 {{
   "scores": {{
@@ -195,7 +208,9 @@ Score the agent on these four dimensions. Be strict and honest.
     "error_handling"       : <float 0.0-1.0>,
     "output_quality"       : <float 0.0-1.0>,
     "hallucination_free"   : <float 0.0-1.0>,
-    "instruction_following": <float 0.0-1.0>
+    "instruction_following": <float 0.0-1.0>,
+    "efficiency"           : <float 0.0-1.0>,
+    "tool_appropriateness" : <float 0.0-1.0>
   }},
   "reasoning": "<2-3 sentences explaining your overall assessment>"
 }}"""
@@ -327,7 +342,7 @@ def _resolve_weights(weights: dict[str, float] | None) -> dict[str, float]:
 
     missing = set(METRIC_KEYS) - set(weights)
     if missing:
-        raise ValueError(f"Missing metric keys: {missing}. All four must be specified.")
+        raise ValueError(f"Missing metric keys: {missing}. All {len(METRIC_KEYS)} must be specified.")
 
     total = sum(weights.values())
     if abs(total - 1.0) > 1e-6:

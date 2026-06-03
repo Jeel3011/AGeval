@@ -1,7 +1,13 @@
 """
 ageval — Episodic evaluation framework for LLM agents.
 
-Works with ANY agent framework:
+ZERO code changes (recommended) — instrument an existing agent with ONE line:
+
+      import ageval.auto   # patches OpenAI/Anthropic + installs a global
+                           # LangChain/LangGraph callback at import time.
+                           # CrewAI/AutoGen are covered transitively.
+
+Or integrate explicitly with any agent framework:
 
   LangGraph / LangChain:
       from ageval import trace_agent
@@ -72,6 +78,14 @@ from ageval.metrics import (
     output_richness,
     latency_budget,
     error_recovery_speed,
+    # deep evaluation (v2)
+    recovery_success_rate,
+    failure_clustering,
+    tool_selection_entropy,
+    progress_monotonicity,
+    cost_per_success,
+    latency_consistency,
+    error_concentration,
 )
 
 # LangGraph / LangChain (optional — only works if langchain is installed)
@@ -126,6 +140,14 @@ __all__ = [
     "output_richness",
     "latency_budget",
     "error_recovery_speed",
+    # Deep evaluation metrics (v2)
+    "recovery_success_rate",
+    "failure_clustering",
+    "tool_selection_entropy",
+    "progress_monotonicity",
+    "cost_per_success",
+    "latency_consistency",
+    "error_concentration",
     # LangGraph
     "trace_agent",
     "recall_episodes",
