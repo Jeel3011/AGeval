@@ -14,44 +14,44 @@ interface Episode {
   created_at: string;
 }
 
-interface KPIs {
-  total: number;
-  successRate: number;
-  failureRate: number;
-  avgSteps: number;
-}
-
-function computeKPIs(episodes: Episode[]): KPIs {
-  if (!episodes.length) return { total: 0, successRate: 0, failureRate: 0, avgSteps: 0 };
-  const successes = episodes.filter(e => e.outcome === "success").length;
-  const failures  = episodes.filter(e => e.outcome === "failure").length;
-  const totalSteps = episodes.reduce((s, e) => s + (e.total_steps ?? 0), 0);
-  return {
-    total:       episodes.length,
-    successRate: Math.round((successes / episodes.length) * 100),
-    failureRate: Math.round((failures  / episodes.length) * 100),
-    avgSteps:    Math.round(totalSteps / episodes.length),
-  };
+interface Overview {
+  total_episodes: number;
+  success_rate: number;
+  failure_rate: number;
+  partial_rate: number;
+  avg_steps: number;
+  avg_latency_ms: number;
+  agent_count: number;
+  scores: Record<string, number>;
+  metric_breakdown: Record<string, number>;
 }
 
 export default function DashboardOverview() {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
+  const [overview, setOverview] = useState<Overview | null>(null);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     setError(null);
-    apiGet("/episodes?limit=50")
-      .then(d => { setEpisodes(d.episodes ?? []); })
+    Promise.all([
+      apiGet("/overview"),
+      apiGet("/episodes?limit=50"),
+    ])
+      .then(([ov, eps]) => {
+        setOverview(ov);
+        setEpisodes(eps.episodes ?? []);
+      })
       .catch((e: ApiError) => setError(e.message))
       .finally(() => setLoading(false));
   };
 
   useEffect(load, []);
 
-  const kpi = computeKPIs(episodes);
   const failures = episodes.filter(e => e.outcome === "failure").slice(0, 5);
+  const pct = (v: number | undefined) => Math.round((v ?? 0) * 100);
+  const avgScore = overview?.scores?.custom ?? overview?.scores?.rules;
 
   return (
     <div className="p-8">
@@ -91,13 +91,36 @@ export default function DashboardOverview() {
             ))
           ) : (
             <>
-              <KpiCard title="Total Episodes"  value={kpi.total.toLocaleString()} sub="last 50 fetched" />
-              <KpiCard title="Success Rate"    value={`${kpi.successRate}%`}       sub="episodes with outcome=success" positive />
-              <KpiCard title="Failure Rate"    value={`${kpi.failureRate}%`}       sub="episodes with outcome=failure" negative={kpi.failureRate > 20} />
-              <KpiCard title="Avg Steps"       value={String(kpi.avgSteps)}        sub="tool calls per episode" />
+              <KpiCard title="Total Episodes"  value={(overview?.total_episodes ?? 0).toLocaleString()} sub={`${overview?.agent_count ?? 0} agents tracked`} />
+              <KpiCard title="Success Rate"    value={`${pct(overview?.success_rate)}%`} sub="episodes with outcome=success" positive />
+              <KpiCard
+                title="Avg Score"
+                value={avgScore !== undefined ? avgScore.toFixed(2) : "—"}
+                sub={overview?.scores?.custom !== undefined ? "custom-metric composite" : overview?.scores?.rules !== undefined ? "rule-based composite" : "no scores yet"}
+                positive={avgScore !== undefined && avgScore >= 0.7}
+                negative={avgScore !== undefined && avgScore < 0.5}
+              />
+              <KpiCard title="Avg Steps" value={String(Math.round(overview?.avg_steps ?? 0))} sub="tool calls per episode" />
             </>
           )}
         </div>
+
+        {/* Metric breakdown — averaged across episodes, from the custom scorer */}
+        {!loading && overview && Object.keys(overview.metric_breakdown ?? {}).length > 0 && (
+          <div className="border border-zinc-200 bg-white rounded-xl shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-zinc-900">Metric Breakdown</h3>
+              <span className="text-xs text-zinc-400">averaged across last {overview.total_episodes} episodes</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3">
+              {Object.entries(overview.metric_breakdown)
+                .sort((a, b) => a[1] - b[1])
+                .map(([name, val]) => (
+                  <MetricRow key={name} name={name} value={val} />
+                ))}
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-6">
           {/* Recent episodes mini-table */}
@@ -190,6 +213,21 @@ function KpiCard({ title, value, sub, positive, negative }: {
       <div className={`text-xs font-medium ${positive ? "text-emerald-600" : negative ? "text-rose-600" : "text-zinc-400"}`}>
         {sub}
       </div>
+    </div>
+  );
+}
+
+function MetricRow({ name, value }: { name: string; value: number }) {
+  const pct = Math.round(value * 100);
+  const color = value >= 0.8 ? "bg-emerald-500" : value >= 0.5 ? "bg-amber-500" : "bg-rose-500";
+  const label = name.replace(/_/g, " ");
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-sm text-zinc-600 w-44 shrink-0 capitalize truncate" title={label}>{label}</span>
+      <div className="flex-1 bg-zinc-100 rounded-full h-2">
+        <div className={`${color} h-2 rounded-full transition-all duration-700`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-sm font-medium text-zinc-700 w-10 text-right tabular-nums">{value.toFixed(2)}</span>
     </div>
   );
 }

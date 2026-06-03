@@ -770,6 +770,107 @@ def list_episodes(
     return {"episodes": resp.data or [], "count": len(resp.data or [])}
 
 
+@app.get("/overview")
+def dashboard_overview(
+    limit  : int = Query(200, ge=1, le=1000, description="How many recent episodes to aggregate"),
+    user_id: str = Depends(verify_api_key),
+):
+    """
+    One-call dashboard KPI aggregate for the authenticated user.
+
+    Aggregates the most recent `limit` episodes: outcome counts, average steps,
+    average score per scorer, and the average breakdown of the custom-metric
+    scorer (so the dashboard can show WHICH dimensions are weak, not just the
+    composite). Everything here is computed from data the merger actually
+    persists — no mock values.
+    """
+    db = get_db()
+
+    eps_resp = (
+        db.table("episodes")
+        .select("episode_id, agent_id, outcome, total_steps, total_latency_ms, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    episodes = eps_resp.data or []
+    total = len(episodes)
+
+    if total == 0:
+        return {
+            "total_episodes": 0, "success_rate": 0.0, "failure_rate": 0.0,
+            "partial_rate": 0.0, "avg_steps": 0.0, "avg_latency_ms": 0.0,
+            "agent_count": 0, "scores": {}, "metric_breakdown": {},
+        }
+
+    successes = sum(1 for e in episodes if e.get("outcome") == "success")
+    failures  = sum(1 for e in episodes if e.get("outcome") == "failure")
+    partials  = sum(1 for e in episodes if e.get("outcome") == "partial")
+    avg_steps = sum(e.get("total_steps") or 0 for e in episodes) / total
+    avg_lat   = sum(e.get("total_latency_ms") or 0 for e in episodes) / total
+    agents    = {e["agent_id"] for e in episodes if e.get("agent_id")}
+
+    ep_ids = [e["episode_id"] for e in episodes]
+    scores_resp = (
+        db.table("episode_scores")
+        .select("episode_id, scorer, score, breakdown")
+        .in_("episode_id", ep_ids)
+        .execute()
+    )
+    score_rows = scores_resp.data or []
+
+    # Average composite score per scorer.
+    by_scorer: dict[str, list[float]] = {}
+    custom_breakdowns: list[dict] = []
+    for row in score_rows:
+        scorer = row.get("scorer")
+        try:
+            by_scorer.setdefault(scorer, []).append(float(row["score"]))
+        except (TypeError, ValueError, KeyError):
+            pass
+        if scorer == "custom" and isinstance(row.get("breakdown"), dict):
+            custom_breakdowns.append(row["breakdown"])
+
+    scores = {
+        scorer: round(sum(vals) / len(vals), 4)
+        for scorer, vals in by_scorer.items() if vals
+    }
+
+    # Average each custom metric across episodes (numeric values only).
+    metric_breakdown: dict[str, float] = {}
+    if custom_breakdowns:
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        for bd in custom_breakdowns:
+            for k, v in bd.items():
+                if isinstance(v, (int, float)):
+                    sums[k] = sums.get(k, 0.0) + float(v)
+                    counts[k] = counts.get(k, 0) + 1
+        metric_breakdown = {
+            k: round(sums[k] / counts[k], 4) for k in sums if counts[k]
+        }
+
+    return {
+        "total_episodes": total,
+        "success_rate"  : round(successes / total, 4),
+        "failure_rate"  : round(failures / total, 4),
+        "partial_rate"  : round(partials / total, 4),
+        "avg_steps"     : round(avg_steps, 2),
+        "avg_latency_ms": round(avg_lat, 1),
+        "agent_count"   : len(agents),
+        "scores"        : scores,            # {"rules": 0.8, "custom": 0.79, "llm_judge": 0.72}
+        "metric_breakdown": metric_breakdown,  # {"success_rate": 0.9, "backtrack_rate": 1.0, ...}
+    }
+
+
+@app.get("/metrics/catalogue")
+def metric_catalogue(user_id: str = Depends(verify_api_key)):
+    """Public catalogue of all registered deterministic metrics + descriptions."""
+    from ageval.metrics import list_metrics
+    return {"metrics": list_metrics(), "count": len(list_metrics())}
+
+
 @app.get("/episodes/{episode_id}")
 def get_episode(
     episode_id: str,
@@ -1167,9 +1268,7 @@ def _assert_episode_owned(db, episode_id: str, user_id: str) -> None:
 from api.synthetic import router as synthetic_router
 from api.redteam import router as redteam_router
 from api.datasets import router as datasets_router
-from api.jobs import router as jobs_router
 
 app.include_router(synthetic_router)
 app.include_router(redteam_router)
 app.include_router(datasets_router)
-app.include_router(jobs_router)

@@ -98,6 +98,14 @@ def trace_openai(
     tool_functions = tool_functions or {}
     working_messages = list(messages)
 
+    # Seed reasoning from any user/system content so the first tool call isn't
+    # left with empty reasoning when the model jumps straight to a tool.
+    last_reasoning = ""
+    for _m in reversed(messages):
+        if isinstance(_m, dict) and _m.get("role") == "user" and _m.get("content"):
+            last_reasoning = f"task: {str(_m['content'])[:200]}"
+            break
+
     with AgentSession(agent_id=agent_id, task=task, batch=True) as session:
         for iteration in range(max_iterations):
             # --- LLM call ---
@@ -124,6 +132,16 @@ def trace_openai(
 
             choice = response.choices[0]
             assistant_msg = choice.message
+
+            # Reasoning attribution: when an OpenAI model emits tool_calls, the
+            # `content` field on that same message is almost always null/empty —
+            # the model puts its rationale in the *previous* assistant turn (or
+            # in `content` only when it stops). Falling back to the last
+            # non-empty assistant content keeps reasoning_coverage from scoring
+            # 0.0 on every function-calling agent.
+            turn_reasoning = (assistant_msg.content or "").strip() or last_reasoning
+            if (assistant_msg.content or "").strip():
+                last_reasoning = assistant_msg.content.strip()
 
             # Record the LLM call itself as a step
             session.record_step(
@@ -176,7 +194,7 @@ def trace_openai(
                         error_message=error_msg,
                         error_category="agent_error",
                         is_recoverable=False,
-                        reasoning=assistant_msg.content,
+                        reasoning=turn_reasoning,
                     )
                     working_messages.append(
                         {
@@ -207,7 +225,7 @@ def trace_openai(
                         tool_input=fn_args,
                         tool_output=_safe_serialize(result),
                         success=True,
-                        reasoning=assistant_msg.content,
+                        reasoning=turn_reasoning,
                         latency_ms=tool_latency,
                     )
 
@@ -225,7 +243,7 @@ def trace_openai(
                         tool_name=fn_name,
                         exc=exc,
                         tool_input=fn_args,
-                        reasoning=assistant_msg.content,
+                        reasoning=turn_reasoning,
                         latency_ms=tool_latency,
                     )
                     working_messages.append(

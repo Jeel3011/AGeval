@@ -25,6 +25,24 @@ class GenerationRequest(BaseModel):
     num_examples_to_generate: int = 10
     dataset_name: str
 
+
+def _extract_array(parsed: object) -> list:
+    """OpenAI's json_object mode returns a top-level OBJECT, not a bare array.
+    Models commonly wrap the list under a key like "examples"/"data"/"items".
+    Pull out the first list value; if the response *is* a list, use it directly.
+    """
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        # Prefer well-known keys, then fall back to the first list value.
+        for key in ("examples", "data", "items", "results", "cases"):
+            if isinstance(parsed.get(key), list):
+                return parsed[key]
+        for value in parsed.values():
+            if isinstance(value, list):
+                return value
+    return []
+
 @router.post("/generate")
 def generate_synthetic_data(req: GenerationRequest):
     """
@@ -55,13 +73,15 @@ def generate_synthetic_data(req: GenerationRequest):
             temperature=0.8,
             response_format={"type": "json_object"}
         )
-        # Mock parsing for execution
-        generated_data = response.choices[0].message.content
+        raw = response.choices[0].message.content
+        parsed = json.loads(raw)
+        examples = _extract_array(parsed)
         return {
             "status": "success",
             "dataset_name": req.dataset_name,
-            "generated_count": req.num_examples_to_generate,
-            "data": json.loads(generated_data)
+            "requested_count": req.num_examples_to_generate,
+            "generated_count": len(examples),   # the ACTUAL number returned
+            "data": examples,
         }
     except json.JSONDecodeError as e:
         log.error(f"Generation returned invalid JSON: {e}")

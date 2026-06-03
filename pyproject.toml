@@ -34,12 +34,14 @@ classifiers = [
 langchain = ["langchain-core>=0.2", "langsmith>=0.1"]
 # For OpenAI function-calling agents
 openai = ["openai>=1.0"]
+# For Anthropic (Claude) tool-use agents
+anthropic = ["anthropic>=0.40"]
 # For running the server
 server = ["fastapi>=0.100", "uvicorn[standard]", "supabase", "redis>=5.0", "scikit-learn", "numpy"]
 # Everything (self-reference must use the distribution name: ageval-sdk)
-all = ["ageval-sdk[langchain,openai,server,otel]"]
+all = ["ageval-sdk[langchain,openai,anthropic,server,otel]"]
 # Development
-dev = ["pytest>=7", "ruff", "mypy"]
+dev = ["pytest>=7", "ruff", "mypy", "hypothesis"]
 # OpenTelemetry
 otel = ["opentelemetry-api"]
 

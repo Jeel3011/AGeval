@@ -30,6 +30,9 @@ from ageval.metrics import (
     reasoning_depth,
     multi_tool_usage,
     output_richness,
+    backtrack_rate,
+    token_economy,
+    reasoning_action_alignment,
 )
 
 
@@ -344,3 +347,68 @@ class TestMemoryMetrics:
         steps = [{"success": True, "tool_output": "ok"}]
         score = output_richness(steps, {})
         assert 0.0 < score < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Backtracking / cost metrics
+# ---------------------------------------------------------------------------
+class TestBacktrackCostMetrics:
+    def test_backtrack_none(self):
+        steps = [
+            {"step_index": 0, "tool_name": "search", "tool_input": {"q": "a"}},
+            {"step_index": 1, "tool_name": "search", "tool_input": {"q": "b"}},
+            {"step_index": 2, "tool_name": "parse", "tool_input": {"q": "a"}},
+        ]
+        assert backtrack_rate(steps, {}) == 1.0
+
+    def test_backtrack_repeats_exact_input(self):
+        # Same tool + identical input called 3 times → 2 repeats out of 2 transitions.
+        steps = [
+            {"step_index": 0, "tool_name": "search", "tool_input": {"q": "a"}},
+            {"step_index": 1, "tool_name": "search", "tool_input": {"q": "a"}},
+            {"step_index": 2, "tool_name": "search", "tool_input": {"q": "a"}},
+        ]
+        assert backtrack_rate(steps, {}) == 0.0
+
+    def test_backtrack_single_step(self):
+        assert backtrack_rate([{"step_index": 0, "tool_name": "x"}], {}) == 1.0
+
+    def test_token_economy_no_usage(self):
+        # No token usage recorded → nothing to penalize.
+        steps = [{"tool_name": "search", "tool_output": {"results": []}}]
+        assert token_economy(steps, {}) == 1.0
+
+    def test_token_economy_cheap(self):
+        steps = [{"tool_name": "llm_call", "tool_output": {"input_tokens": 500, "output_tokens": 200}}]
+        assert token_economy(steps, {}) == 1.0
+
+    def test_token_economy_expensive(self):
+        steps = [{"tool_name": "llm_call", "tool_output": {"input_tokens": 40000, "output_tokens": 20000}}]
+        assert token_economy(steps, {}) == 0.0
+
+    def test_token_economy_medium(self):
+        steps = [{"tool_name": "llm_call", "tool_output": {"input_tokens": 10000, "output_tokens": 5000}}]
+        score = token_economy(steps, {})
+        assert 0.0 < score < 1.0
+
+    def test_reasoning_action_alignment_perfect(self):
+        steps = [
+            {"tool_name": "search", "success": True, "reasoning": "need data"},
+            {"tool_name": "parse", "success": True, "reasoning": "extract it"},
+        ]
+        assert reasoning_action_alignment(steps, {}) == 1.0
+
+    def test_reasoning_action_alignment_no_reasoning(self):
+        steps = [
+            {"tool_name": "search", "success": True, "reasoning": None},
+            {"tool_name": "parse", "success": True, "reasoning": ""},
+        ]
+        assert reasoning_action_alignment(steps, {}) == 0.0
+
+    def test_reasoning_action_alignment_ignores_llm_call(self):
+        # llm_call steps are excluded; only the real tool step counts.
+        steps = [
+            {"tool_name": "llm_call", "success": True, "reasoning": "thinking"},
+            {"tool_name": "search", "success": True, "reasoning": "go"},
+        ]
+        assert reasoning_action_alignment(steps, {}) == 1.0

@@ -53,19 +53,36 @@ export const datasetsApi = {
   }
 };
 
-export const jobsApi = {
-  launchRedTeam: async (projectId: string) => {
-    const response = await apiClient.post('/v1/jobs/redteam', {
-      project_id: projectId,
-      attack_vectors: ["prompt_injection", "data_exfiltration"]
+export interface RedTeamScorecard {
+  model: string;
+  probes_run: number;
+  bypasses: number;
+  overall_grade: string;
+  overall_bypass_rate: number;
+  prompt_injection_bypass_rate: number;
+  roleplay_jailbreak_bypass_rate: number;
+  data_exfiltration_bypass_rate: number;
+  dow_success_rate: number;
+  results: Array<{
+    vector: string;
+    name: string;
+    severity: string;
+    bypassed: boolean;
+    response_preview: string;
+  }>;
+}
+
+export const redTeamApi = {
+  // Synchronous: runs the probe library against the model and returns a REAL
+  // scorecard from the model's actual responses (no fake progress polling).
+  run: async (agentId: string, model = 'gpt-4o-mini'): Promise<{ scorecard: RedTeamScorecard }> => {
+    const response = await apiClient.post('/redteam/run', {
+      agent_id: agentId,
+      model,
+      attack_vectors: ['prompt_injection', 'roleplay_jailbreak', 'data_exfiltration', 'dow'],
     });
     return response.data;
   },
-  
-  getJobStatus: async (jobId: string) => {
-    const response = await apiClient.get(`/v1/jobs/${jobId}`);
-    return response.data;
-  }
 };
 
 export const keysApi = {

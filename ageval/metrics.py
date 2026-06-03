@@ -28,11 +28,18 @@ Usage:
 
 from __future__ import annotations
 
+import json as _json_mod
 import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
+
+
+def _idx(step: dict) -> int:
+    """step_index as an int, treating None/missing as 0 (None-safe for sort)."""
+    v = step.get("step_index")
+    return v if isinstance(v, int) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +125,7 @@ def tool_diversity(steps: list[dict], episode: dict) -> float:
 )
 def latency_budget(steps: list[dict], episode: dict) -> float:
     """1.0 if under 5s, decays to 0.0 at 60s."""
-    total_ms = sum(s.get("latency_ms", 0) for s in steps)
+    total_ms = sum((s.get("latency_ms") or 0) for s in steps)
     total_s = total_ms / 1000
     if total_s <= 5:
         return 1.0
@@ -134,7 +141,7 @@ def latency_budget(steps: list[dict], episode: dict) -> float:
 )
 def error_recovery_speed(steps: list[dict], episode: dict) -> float:
     """1.0 if immediate recovery, decays with recovery distance."""
-    sorted_steps = sorted(steps, key=lambda s: s.get("step_index", 0))
+    sorted_steps = sorted(steps, key=_idx)
     error_indices = [
         i for i, s in enumerate(sorted_steps)
         if not s.get("success") and s.get("error_category") == "env_error"
@@ -216,7 +223,7 @@ def first_call_success(steps: list[dict], episode: dict) -> float:
     """1.0 if first step succeeded, 0.0 otherwise."""
     if not steps:
         return 0.0
-    first = min(steps, key=lambda s: s.get("step_index", 0))
+    first = min(steps, key=_idx)
     return 1.0 if first.get("success") else 0.0
 
 
@@ -229,7 +236,7 @@ def last_call_success(steps: list[dict], episode: dict) -> float:
     """1.0 if the last step succeeded, 0.0 otherwise."""
     if not steps:
         return 0.0
-    last = max(steps, key=lambda s: s.get("step_index", 0))
+    last = max(steps, key=_idx)
     return 1.0 if last.get("success") else 0.0
 
 
@@ -285,7 +292,7 @@ def retry_overhead(steps: list[dict], episode: dict) -> float:
     """1.0 = no retries; 0.0 = every adjacent pair is a retry."""
     if len(steps) <= 1:
         return 1.0
-    sorted_steps = sorted(steps, key=lambda s: s.get("step_index", 0))
+    sorted_steps = sorted(steps, key=_idx)
     retries = 0
     for i in range(1, len(sorted_steps)):
         prev = sorted_steps[i - 1]
@@ -326,7 +333,7 @@ def goal_progress(steps: list[dict], episode: dict) -> float:
     """Fraction of transitions that advanced to a *new* tool (vs repeated calls)."""
     if len(steps) <= 1:
         return 1.0 if steps and steps[0].get("success") else 0.0
-    sorted_steps = sorted(steps, key=lambda s: s.get("step_index", 0))
+    sorted_steps = sorted(steps, key=_idx)
     advances = sum(
         1 for i in range(1, len(sorted_steps))
         if sorted_steps[i].get("tool_name") != sorted_steps[i - 1].get("tool_name")
@@ -392,6 +399,95 @@ def output_richness(steps: list[dict], episode: dict) -> float:
         except (TypeError, ValueError):
             lengths.append(0)
     return round(sum(lengths) / (len(lengths) * 500), 4)
+
+
+# ---------------------------------------------------------------------------
+# ── Backtracking / cost metrics ───────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+
+def _input_fingerprint(step: dict) -> str:
+    """Stable fingerprint of (tool_name, tool_input) for duplicate detection."""
+    tool = step.get("tool_name", "")
+    inp = step.get("tool_input")
+    try:
+        inp_key = _json_mod.dumps(inp, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        inp_key = str(inp)
+    return f"{tool}::{inp_key}"
+
+
+@register_metric(
+    "backtrack_rate",
+    weight=0.0,
+    description="How often the agent re-calls a tool with the *exact same input* "
+                "it already used (anywhere earlier, not just back-to-back). "
+                "High backtracking = the agent is looping or forgot prior results.",
+)
+def backtrack_rate(steps: list[dict], episode: dict) -> float:
+    """1.0 = no repeated (tool, input) pairs; 0.0 = every call after the first repeats."""
+    if len(steps) <= 1:
+        return 1.0
+    sorted_steps = sorted(steps, key=_idx)
+    seen: set[str] = set()
+    repeats = 0
+    for s in sorted_steps:
+        fp = _input_fingerprint(s)
+        if fp in seen:
+            repeats += 1
+        else:
+            seen.add(fp)
+    return round(1.0 - repeats / (len(sorted_steps) - 1), 4)
+
+
+@register_metric(
+    "token_economy",
+    weight=0.0,
+    description="Token efficiency from llm_call usage (input+output tokens). "
+                "1.0 if the episode used ≤2k tokens, decaying to 0.0 at ≥50k. "
+                "Returns 1.0 when no token usage was recorded (nothing to penalize).",
+)
+def token_economy(steps: list[dict], episode: dict) -> float:
+    """Cost-aware metric. Reads input_tokens/output_tokens from llm_call outputs."""
+    total = 0
+    saw_usage = False
+    for s in steps:
+        out = s.get("tool_output")
+        if not isinstance(out, dict):
+            continue
+        it = out.get("input_tokens")
+        ot = out.get("output_tokens")
+        if it is not None or ot is not None:
+            saw_usage = True
+            total += (it or 0) + (ot or 0)
+    if not saw_usage:
+        return 1.0
+    if total <= 2_000:
+        return 1.0
+    if total >= 50_000:
+        return 0.0
+    return round(1.0 - (total - 2_000) / 48_000, 4)
+
+
+@register_metric(
+    "reasoning_action_alignment",
+    weight=0.0,
+    description="Fraction of tool calls that were preceded by reasoning AND succeeded. "
+                "Rewards agents that think before acting and act correctly.",
+)
+def reasoning_action_alignment(steps: list[dict], episode: dict) -> float:
+    """A step counts if it has non-empty reasoning and succeeded."""
+    tool_steps = [s for s in steps if s.get("tool_name") != "llm_call"]
+    if not tool_steps:
+        # Fall back to all steps if the agent recorded no distinct tool steps.
+        tool_steps = steps
+    if not tool_steps:
+        return 0.0
+    aligned = sum(
+        1 for s in tool_steps
+        if s.get("success") and s.get("reasoning") and str(s["reasoning"]).strip()
+    )
+    return round(aligned / len(tool_steps), 4)
 
 
 # ---------------------------------------------------------------------------

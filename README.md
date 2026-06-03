@@ -76,7 +76,26 @@ result = trace_openai(
 # result["episode_id"] → use to query scores later
 ```
 
-### 3. LangGraph / LangChain (Zero Changes)
+### 3. Anthropic (Claude) Tool Use
+
+```python
+from ageval import trace_anthropic
+from anthropic import Anthropic
+
+client = Anthropic()
+result = trace_anthropic(
+    client=client,
+    messages=[{"role": "user", "content": "Plan a trip to Paris"}],
+    tools=my_tool_definitions,           # Anthropic format (name/description/input_schema)
+    tool_functions={"search_flights": search_flights, "search_hotels": search_hotels},
+    agent_id="trip_planner_v1",
+    task="Plan a trip to Paris",
+    model="claude-haiku-4-5-20251001",
+)
+# result["episode_id"], result["usage"] → tokens captured for cost metrics
+```
+
+### 4. LangGraph / LangChain (Zero Changes)
 
 ```python
 from ageval import trace_agent
@@ -131,8 +150,21 @@ Uses GPT-4o-mini (or any model) for qualitative evaluation:
 | `reasoning_quality` | Was the chain-of-thought coherent? |
 | `error_handling` | Did the agent recover gracefully? |
 | `output_quality` | Is the final output useful and accurate? |
+| `hallucination_free` | Did the agent avoid stating facts not grounded in its tool outputs? |
+| `instruction_following` | Did the agent stay within the user's stated constraints? |
 
-### Custom metrics (NEW in v0.3)
+### Built-in deterministic metrics (19, no LLM required)
+
+Beyond the 4 rule metrics above, AGeval ships 19 registered deterministic
+metrics — reliability (`agent_error_rate`, `fatal_error_rate`, `first/last_call_success`),
+efficiency (`step_economy`, `p95_step_latency`, `retry_overhead`, `backtrack_rate`,
+`token_economy`), agentic (`tool_call_precision`, `goal_progress`, `reasoning_depth`,
+`reasoning_action_alignment`), and observability (`tool_diversity`, `multi_tool_usage`,
+`output_richness`). The merger runs all of them after every episode and persists
+the result as the `custom` scorer. List them via `GET /metrics/catalogue` or
+`ageval.list_metrics()`.
+
+### Custom metrics
 
 Define your own domain-specific metrics:
 
@@ -174,13 +206,24 @@ POST /jobs           — trigger scoring
 
 ### Query (Dashboard / CLI)
 ```
-GET  /episodes                 — list episodes
+GET  /overview                 — one-call KPI aggregate: outcomes, avg score per scorer, metric breakdown
+GET  /episodes                 — list episodes (filter: ?agent_id= &outcome=)
 GET  /episodes/{id}            — full detail + steps + scores
 GET  /episodes/{id}/steps      — paginated steps
-GET  /trends?agent_id=X        — score time-series (NEW)
+GET  /agents                   — distinct agent_ids for the authenticated user
+GET  /trends?agent_id=X        — score time-series (scorer = rules | custom | llm_judge)
+GET  /metrics/catalogue        — list all built-in deterministic metrics + descriptions
 GET  /similar?episode_id=X     — find similar episodes
 GET  /recall?task=...          — semantic search by task
 GET  /compare?episode_a=X&episode_b=Y
+```
+
+### Evaluation services
+```
+POST /redteam/run              — run real adversarial probes against a model, get a security scorecard
+POST /synthetic/generate       — LLM-bootstrap a dataset from seed examples
+GET  /v1/datasets?project_id=X — list golden datasets (Supabase-backed, user-scoped)
+POST /v1/datasets              — create a golden dataset + test cases
 ```
 
 ### Key Management
@@ -201,6 +244,7 @@ All requests require `Authorization: Bearer ageval-sk-<your-key>`.
 |-----------|-------------|--------|
 | **Any custom agent** | `AgentSession` + `record_step()` | Wrap each tool call |
 | **OpenAI function calling** | `trace_openai()` — full loop | One function call |
+| **Anthropic (Claude) tool use** | `trace_anthropic()` — full loop | One function call |
 | **LangGraph / LangChain** | `trace_agent()` — drop-in | Zero changes |
 | **CrewAI, AutoGen** | `AgentSession` + `traced()` | Wrap each tool call |
 | **Any async agent** | `AgentSession` + `traced_async()` | Wrap each tool call |

@@ -47,10 +47,12 @@ from datetime import datetime, timezone
 log = logging.getLogger(__name__)
 
 DEFAULT_WEIGHTS = {
-    "task_completion"  : 0.35,
-    "reasoning_quality": 0.25,
-    "error_handling"   : 0.20,
-    "output_quality"   : 0.20,
+    "task_completion"      : 0.25,
+    "reasoning_quality"    : 0.15,
+    "error_handling"       : 0.10,
+    "output_quality"       : 0.15,
+    "hallucination_free"   : 0.20,   # 1.0 = no unsupported claims
+    "instruction_following": 0.15,   # 1.0 = stayed within the user's constraints
 }
 METRIC_KEYS = list(DEFAULT_WEIGHTS.keys())
 
@@ -118,10 +120,10 @@ def _build_prompt(episode: dict, steps: list[dict]) -> str:
     final_output = episode.get("final_output")
 
     steps_text = "\n".join(
-        f"  Step {s['step_index']}: {s['tool_name']} → "
+        f"  Step {s.get('step_index', '?')}: {s.get('tool_name') or 'unknown'} → "
         f"{'SUCCESS' if s.get('success') else 'FAIL (' + str(s.get('error_category','?')) + ')'}"
-        + (f" | reasoning: {s['reasoning'][:200]}" if s.get("reasoning") else " | no reasoning")
-        + (f" | latency: {s.get('latency_ms', 0)}ms")
+        + (f" | reasoning: {str(s['reasoning'])[:200]}" if s.get("reasoning") else " | no reasoning")
+        + (f" | latency: {s.get('latency_ms') or 0}ms")
         for s in steps
     )
 
@@ -142,7 +144,7 @@ def _build_prompt(episode: dict, steps: list[dict]) -> str:
 - Task: {task}
 - Outcome: {outcome}
 - Total steps: {len(steps)}
-- Total latency: {sum(s.get('latency_ms', 0) for s in steps)}ms
+- Total latency: {sum((s.get('latency_ms') or 0) for s in steps)}ms
 
 ## Agent Behaviour (step-by-step)
 {steps_text}
@@ -173,13 +175,27 @@ Score the agent on these four dimensions. Be strict and honest.
    - 0.5 = partially useful
    - 0.0 = no output or incorrect / irrelevant output
 
+5. **hallucination_free** (0.0–1.0): Did the agent AVOID stating facts that are
+   not supported by its tool outputs? Higher = more grounded.
+   - 1.0 = every factual claim is traceable to a tool result
+   - 0.5 = some claims are plausible but not grounded in tool outputs
+   - 0.0 = the final answer invents facts that contradict or aren't in the traces
+
+6. **instruction_following** (0.0–1.0): Did the agent stay within the explicit
+   constraints of the task (scope, format, limits the user asked for)?
+   - 1.0 = fully respected every stated constraint
+   - 0.5 = drifted from some constraints
+   - 0.0 = ignored the task's constraints
+
 ## Response Format (JSON only — no other text)
 {{
   "scores": {{
-    "task_completion"  : <float 0.0-1.0>,
-    "reasoning_quality": <float 0.0-1.0>,
-    "error_handling"   : <float 0.0-1.0>,
-    "output_quality"   : <float 0.0-1.0>
+    "task_completion"      : <float 0.0-1.0>,
+    "reasoning_quality"    : <float 0.0-1.0>,
+    "error_handling"       : <float 0.0-1.0>,
+    "output_quality"       : <float 0.0-1.0>,
+    "hallucination_free"   : <float 0.0-1.0>,
+    "instruction_following": <float 0.0-1.0>
   }},
   "reasoning": "<2-3 sentences explaining your overall assessment>"
 }}"""

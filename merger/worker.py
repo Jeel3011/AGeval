@@ -308,6 +308,20 @@ def process_job(client, job: dict):
                 f"breakdown={score_result['breakdown']}"
             )
 
+            # Custom deterministic metrics (reliability/efficiency/agentic/cost).
+            # These never need an LLM, so they always run and persist as the
+            # 'custom' scorer — this is what powers the dashboard metric breakdown.
+            try:
+                from ageval.metrics import score_with_custom_metrics
+                custom_result = score_with_custom_metrics(client, episode_id)
+                log.info(
+                    f"Custom metrics scored {episode_id} | "
+                    f"score={custom_result['score']} | "
+                    f"{len(custom_result['breakdown'])} metrics"
+                )
+            except Exception as custom_exc:
+                log.warning(f"Custom metrics failed for {episode_id}: {custom_exc}")
+
             # LLM judge (optional — requires OPENAI_API_KEY)
             try:
                 from eval.llm_judge import judge_episode

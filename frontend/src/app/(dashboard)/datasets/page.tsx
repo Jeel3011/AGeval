@@ -10,16 +10,18 @@ export default function DatasetsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [newDatasetName, setNewDatasetName] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   const fetchDatasets = () => {
     setIsLoading(true);
+    setError(null);
     datasetsApi.getDatasets("prj_9x8c7v6b")
       .then(data => {
         setDatasets(data);
         setIsLoading(false);
       })
-      .catch(err => {
-        console.error("Failed to fetch datasets:", err);
+      .catch((err: any) => {
+        setError(err?.response?.data?.detail || err?.message || "Failed to fetch datasets");
         setIsLoading(false);
       });
   };
@@ -45,8 +47,8 @@ export default function DatasetsPage() {
       setIsModalOpen(false);
       setNewDatasetName("");
       fetchDatasets(); // Refresh table
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || err?.message || "Failed to create dataset");
     } finally {
       setIsSubmitting(false);
     }
@@ -107,6 +109,12 @@ export default function DatasetsPage() {
             </button>
           </div>
         </div>
+
+        {error && (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+        )}
 
         <div className="border border-zinc-200 bg-white rounded-xl shadow-sm overflow-hidden flex flex-col">
           <div className="h-14 border-b border-zinc-200 px-4 flex items-center justify-between bg-zinc-50/50">

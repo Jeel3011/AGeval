@@ -12,6 +12,11 @@ Works with ANY agent framework:
       result = trace_openai(client, messages, tools, tool_functions,
                             agent_id="v1", task="do X")
 
+  Anthropic (Claude) tool use:
+      from ageval import trace_anthropic
+      result = trace_anthropic(client, messages, tools, tool_functions,
+                               agent_id="v1", task="do X")
+
   Any framework (CrewAI, AutoGen, custom):
       from ageval import AgentSession
       with AgentSession(agent_id="v1", task="do X") as session:
@@ -57,6 +62,10 @@ from ageval.metrics import (
     tool_call_precision,
     goal_progress,
     reasoning_depth,
+    # built-in backtracking / cost
+    backtrack_rate,
+    token_economy,
+    reasoning_action_alignment,
     # built-in observability
     tool_diversity,
     multi_tool_usage,
@@ -73,6 +82,14 @@ try:
     from ageval.openai_tracer import trace_openai
 except ImportError:
     trace_openai = None  # type: ignore[assignment]
+
+# Anthropic (Claude) tool use. The tracer only imports the AGeval session, not
+# the anthropic SDK itself (the caller passes the client), so this import is
+# always safe — keep the try/except purely defensive.
+try:
+    from ageval.anthropic_tracer import trace_anthropic
+except ImportError:  # pragma: no cover - defensive
+    trace_anthropic = None  # type: ignore[assignment]
 
 __all__ = [
     # Universal
@@ -99,6 +116,10 @@ __all__ = [
     "tool_call_precision",
     "goal_progress",
     "reasoning_depth",
+    # Built-in backtracking / cost metrics
+    "backtrack_rate",
+    "token_economy",
+    "reasoning_action_alignment",
     # Built-in observability metrics
     "tool_diversity",
     "multi_tool_usage",
@@ -111,6 +132,8 @@ __all__ = [
     "compare_episodes",
     # OpenAI
     "trace_openai",
+    # Anthropic
+    "trace_anthropic",
 ]
 
 __version__ = "0.3.0"

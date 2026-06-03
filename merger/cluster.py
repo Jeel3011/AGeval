@@ -184,7 +184,7 @@ def _cluster_for_agent(client, user_id: str, agent_id: str):
             if ec["id"] in used_existing_ids:
                 continue
             ec_cent = ast.literal_eval(ec["centroid"]) if isinstance(ec["centroid"], str) else ec["centroid"]
-            dist = np.linalg.norm(np.array(centroid) - np.array(ec_cent))
+            dist = float(np.linalg.norm(np.array(centroid) - np.array(ec_cent)))
             if dist < 0.5 and dist < best_match_dist:  # nearest existing cluster within threshold
                 best_match_dist = dist
                 best_match_id = ec["id"]

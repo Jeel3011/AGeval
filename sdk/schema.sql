@@ -362,6 +362,42 @@ create index if not exists idx_webhook_deliveries_episode
 
 
 -- ============================================================
+-- golden_datasets
+-- A named, versioned set of test cases for an agent (the "golden" set
+-- it should be evaluated against). Scoped per user.
+-- ============================================================
+create table if not exists golden_datasets (
+    id           uuid        primary key default gen_random_uuid(),
+    user_id      text        not null,
+    project_id   text        not null,
+    name         text        not null,
+    version      text        not null default 'v1',
+    created_at   timestamptz not null default now(),
+    updated_at   timestamptz not null default now()
+);
+
+create index if not exists idx_golden_datasets_user
+    on golden_datasets (user_id, project_id, created_at desc);
+
+
+-- ============================================================
+-- dataset_test_cases
+-- One row per test case in a golden dataset.
+-- ============================================================
+create table if not exists dataset_test_cases (
+    id              uuid        primary key default gen_random_uuid(),
+    dataset_id      uuid        not null references golden_datasets(id) on delete cascade,
+    input_data      jsonb       not null,
+    expected_output text,
+    context         jsonb,                          -- optional retrieval context
+    created_at      timestamptz not null default now()
+);
+
+create index if not exists idx_dataset_test_cases_dataset
+    on dataset_test_cases (dataset_id);
+
+
+-- ============================================================
 -- ROW LEVEL SECURITY (RLS) — v3
 --
 -- Enforces multi-tenant data isolation at the Postgres layer.
@@ -565,6 +601,64 @@ create policy webhook_deliveries_select on webhook_deliveries
               and  w.user_id = current_user_id()
         )
     );
+
+-- ---- golden_datasets ------------------------------------------------
+alter table golden_datasets enable row level security;
+
+drop policy if exists golden_datasets_select on golden_datasets;
+create policy golden_datasets_select on golden_datasets
+    for select using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists golden_datasets_insert on golden_datasets;
+create policy golden_datasets_insert on golden_datasets
+    for insert with check (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists golden_datasets_update on golden_datasets;
+create policy golden_datasets_update on golden_datasets
+    for update using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists golden_datasets_delete on golden_datasets;
+create policy golden_datasets_delete on golden_datasets
+    for delete using (user_id = current_user_id());
+
+
+-- ---- dataset_test_cases ---------------------------------------------
+-- Test cases inherit ownership from their parent golden_dataset.
+alter table dataset_test_cases enable row level security;
+
+drop policy if exists dataset_test_cases_select on dataset_test_cases;
+create policy dataset_test_cases_select on dataset_test_cases
+    for select using (
+        current_user_id() = ''
+        or exists (
+            select 1 from golden_datasets d
+            where d.id = dataset_test_cases.dataset_id
+              and d.user_id = current_user_id()
+        )
+    );
+
+drop policy if exists dataset_test_cases_insert on dataset_test_cases;
+create policy dataset_test_cases_insert on dataset_test_cases
+    for insert with check (
+        current_user_id() = ''
+        or exists (
+            select 1 from golden_datasets d
+            where d.id = dataset_test_cases.dataset_id
+              and d.user_id = current_user_id()
+        )
+    );
+
+drop policy if exists dataset_test_cases_delete on dataset_test_cases;
+create policy dataset_test_cases_delete on dataset_test_cases
+    for delete using (
+        current_user_id() = ''
+        or exists (
+            select 1 from golden_datasets d
+            where d.id = dataset_test_cases.dataset_id
+              and d.user_id = current_user_id()
+        )
+    );
+
 
 -- ============================================================
 -- END OF SCHEMA
