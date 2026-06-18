@@ -47,6 +47,7 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -78,8 +79,8 @@ def _api_configured() -> bool:
 
 def _post(path: str, payload: dict | list, *, swallow: bool = True) -> dict | None:
     """POST JSON to the ageval API."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     try:
         url = f"{_get_api_base()}{path}"
@@ -160,6 +161,58 @@ def _safe_serialize(value: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Live verdict (client-side mirror of the API's eval.live.Verdict)
+# ---------------------------------------------------------------------------
+@dataclass
+class Verdict:
+    """A live, in-the-loop verdict returned by ``session.evaluate_step()``.
+
+    ``action`` is advice your code acts on:
+        allow    — nothing concerning; proceed.
+        warn     — a soft signal (off golden path, mild anomaly); proceed but log.
+        escalate — a high-severity concern (matches a known failure, big outlier);
+                   route to review / async judge / human before proceeding.
+        block    — do not run this step (only ever set by an enforce-mode policy;
+                   Phase A never returns this on its own).
+    """
+    action: str = "allow"
+    score: float = 1.0
+    confidence: float = 0.0
+    reasons: list = field(default_factory=list)   # list[dict] {layer, message, severity}
+    suggest: dict | None = None
+    matched_signature_id: str | None = None
+    latency_ms: int | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return self.action == "block"
+
+    @property
+    def ok(self) -> bool:
+        """True when the agent can proceed without intervention."""
+        return self.action in ("allow", "warn")
+
+    def explain(self) -> str:
+        """One-line human summary of why this verdict was reached."""
+        if not self.reasons:
+            return f"{self.action} (no concerns)"
+        msgs = "; ".join(r.get("message", "") for r in self.reasons if isinstance(r, dict))
+        return f"{self.action}: {msgs}"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Verdict":
+        return cls(
+            action=d.get("action", "allow"),
+            score=d.get("score", 1.0),
+            confidence=d.get("confidence", 0.0),
+            reasons=d.get("reasons") or [],
+            suggest=d.get("suggest"),
+            matched_signature_id=d.get("matched_signature_id"),
+            latency_ms=d.get("latency_ms"),
+        )
+
+
+# ---------------------------------------------------------------------------
 # AgentSession — the main class
 # ---------------------------------------------------------------------------
 class AgentSession:
@@ -196,6 +249,7 @@ class AgentSession:
         self.metadata = metadata or {}
         self._batch = batch
         self._steps: list[dict] = []
+        self._tools_seen: list[str] = []   # ordered tool names, for live verdicts
         self._lock = threading.Lock()
         self._step_counter = 0
         self._started = False
@@ -280,7 +334,54 @@ class AgentSession:
         else:
             _post("/steps", record, swallow=True)
 
+        # Track meaningful tool order for live procedural-deviation checks.
+        if tool_name != "llm_call":
+            with self._lock:
+                self._tools_seen.append(tool_name)
+
         return idx
+
+    def evaluate_step(
+        self,
+        tool_name: str,
+        tool_input: Any = None,
+        reasoning: str | None = None,
+    ) -> "Verdict":
+        """
+        Render a LIVE verdict for a step *before* you run it.
+
+        Unlike record_step() (fire-and-forget telemetry), this is
+        request/response: it scores the proposed action against this agent's
+        evaluation memory (known failure signatures, peer baselines, the golden
+        path) and returns an actionable Verdict you can branch on::
+
+            v = session.evaluate_step("charge_card", {"amount": 4200})
+            if v.blocked or v.action == "escalate":
+                amount = (v.suggest or {}).get("amount", amount)  # repair hint
+
+        Fails OPEN: if AGeval is unreachable or unconfigured, returns an
+        ``allow`` verdict so your agent never breaks because of the evaluator.
+        The verdict is *advice* — your code decides what to do with it.
+        """
+        if not _api_configured():
+            return Verdict(action="allow", score=1.0, confidence=0.0)
+
+        with self._lock:
+            tools_so_far = list(self._tools_seen) + [tool_name]
+
+        payload = {
+            "agent_id": self.agent_id,
+            "tool_name": tool_name,
+            "tool_input": _safe_serialize(tool_input),
+            "reasoning": reasoning,
+            "tools_so_far": tools_so_far,
+            "episode_id": self.episode_id,
+            "step_index": self._step_counter,
+        }
+        resp = _post("/evaluate", payload, swallow=True)
+        if not resp:
+            return Verdict(action="allow", score=1.0, confidence=0.0)
+        return Verdict.from_dict(resp)
 
     def record_error(
         self,

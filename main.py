@@ -46,9 +46,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
@@ -380,6 +381,27 @@ class StepCreate(BaseModel):
         return _validate_id(v, 'episode_id')
 
 
+class EvaluateRequest(BaseModel):
+    """A live, in-the-loop verdict request (LIVE_EVAL_WEDGE_PLAN §1).
+
+    Sent BEFORE a tool runs so the agent can act on the verdict. Unlike
+    /steps (fire-and-forget telemetry), this is request/response and returns an
+    actionable `action` scored against the agent's evaluation memory.
+    """
+    agent_id     : str
+    tool_name    : str
+    tool_input   : Any | None = None
+    reasoning    : str | None = None
+    tools_so_far : list[str] | None = None  # tool names already run this episode
+    episode_id   : str | None = None
+    step_index   : int | None = None
+
+    @field_validator('agent_id')
+    @classmethod
+    def check_agent_id(cls, v: str) -> str:
+        return _validate_id(v, 'agent_id')
+
+
 class JobCreate(BaseModel):
     episode_id: str
     run_id    : str          # LangSmith run ID — pass "none" if not using LangSmith
@@ -493,8 +515,8 @@ def register(
     if x_admin_secret != ADMIN_SECRET:
         raise HTTPException(status_code=401, detail="Invalid admin secret")
     db = get_db()
-    import uuid
     import secrets
+    import uuid
     # Generate a cryptographically secure key (48 hex chars = 192 bits of entropy)
     raw_key = f"ageval-sk-{secrets.token_hex(24)}"
     key_hash = _hash_key(raw_key)
@@ -934,6 +956,217 @@ def score_reference(
     if result is None:
         raise HTTPException(status_code=422, detail="Episode has no final output to ground reference metrics on")
     return result
+
+
+@app.post("/evaluate")
+def evaluate_live(
+    body    : EvaluateRequest,
+    user_id : str = Depends(verify_api_key),
+):
+    """
+    Live, in-the-loop verdict for a single step (LIVE_EVAL_WEDGE_PLAN §1).
+
+    Called BEFORE a tool runs. Scores the proposed step against the agent's
+    evaluation memory (failure signatures, cluster baselines, golden path) and
+    returns an actionable verdict:
+
+        {"action": "allow|warn|block|escalate", "score", "confidence",
+         "reasons": [...], "suggest": {...}}
+
+    Hot path is deterministic / vector-only (no LLM) to stay in the agent loop.
+    Phase A is shadow-first: the engine *advises* (never blocks on its own); the
+    verdict is logged to `live_verdicts` when that table exists. Fails open
+    (`allow`) on any error so an AGeval hiccup never breaks the agent.
+    """
+    import time
+
+    from eval.live import evaluate_step as _live_eval
+    from eval.live import load_snapshot
+
+    t0 = time.perf_counter()
+    db = get_db()
+
+    try:
+        snap = load_snapshot(db, user_id, body.agent_id)
+
+        # Embed the step's intent (tool + input + reasoning) for failure-sig
+        # matching. Skipped silently if no embedding backend is configured —
+        # the other two layers still run.
+        embedding = None
+        if snap.signatures:
+            intent = " ".join(filter(None, [
+                body.tool_name,
+                str(body.tool_input) if body.tool_input is not None else None,
+                body.reasoning,
+            ]))
+            embedding = _generate_embedding(intent)
+
+        verdict = _live_eval(
+            snap,
+            tool_name=body.tool_name,
+            tool_input=body.tool_input,
+            step_embedding=embedding,
+            tools_so_far=body.tools_so_far,
+        )
+        # Apply the agent's live policy (LIVE_EVAL_WEDGE_PLAN §2): turns the
+        # advisory action into the enforced one. Only an enforce-mode policy can
+        # promote escalate→block; absent a policy the advisory action stands.
+        from eval.policy import apply_policy
+        verdict = apply_policy(db, user_id, body.agent_id, verdict)
+    except Exception as exc:
+        # Fail open: an evaluator error must never block the caller's agent.
+        log.warning(f"/evaluate failed open for agent={body.agent_id}: {exc}")
+        from eval.live import Verdict
+        verdict = Verdict(action="allow", score=1.0, confidence=0.0)
+
+    verdict.latency_ms = int((time.perf_counter() - t0) * 1000)
+
+    # Shadow-mode audit: record every verdict (best-effort) so the dashboard can
+    # show "would-have-blocked" diffs and ROI. Never fails the request.
+    _log_live_verdict(db, user_id, body, verdict)
+
+    return verdict.to_dict()
+
+
+def _log_live_verdict(db, user_id: str, body: "EvaluateRequest", verdict) -> None:
+    """Best-effort insert into live_verdicts (skips silently if table absent)."""
+    try:
+        db.table("live_verdicts").insert({
+            "user_id"          : user_id,
+            "agent_id"         : body.agent_id,
+            "episode_id"       : body.episode_id,
+            "step_index"       : body.step_index,
+            "input_hash"       : hashlib.sha256(
+                f"{body.tool_name}|{body.tool_input}".encode()
+            ).hexdigest()[:32],
+            "action"           : verdict.action,
+            "score"            : verdict.score,
+            "confidence"       : verdict.confidence,
+            "reasons"          : verdict.to_dict()["reasons"],
+            "matched_signature": verdict.matched_signature_id,
+            "latency_ms"       : verdict.latency_ms,
+        }).execute()
+    except Exception as exc:
+        if "PGRST205" not in str(exc):  # table missing on un-migrated DB → fine
+            log.debug(f"live_verdicts log skipped: {exc}")
+
+
+@app.get("/agents/{agent_id}/policies")
+def get_agent_policy(
+    agent_id: str,
+    user_id : str = Depends(verify_api_key),
+):
+    """
+    The agent's live policy — its highest version, or a safe empty default
+    (LIVE_EVAL_WEDGE_PLAN §2). Absent a policy, verdicts use their advisory
+    action; the engine never blocks on its own.
+    """
+    db = get_db()
+    try:
+        resp = (
+            db.table("live_policies")
+            .select("version, mode, rules, created_at")
+            .eq("user_id", user_id)
+            .eq("agent_id", agent_id)
+            .order("version", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        if "PGRST205" in str(exc):
+            raise HTTPException(status_code=503, detail="live_policies table missing — run sdk/schema.sql")
+        raise HTTPException(status_code=500, detail=str(exc))
+    if not resp.data:
+        return {"agent_id": agent_id, "mode": "log_only", "rules": [], "version": 0}
+    row = resp.data[0]
+    return {"agent_id": agent_id, **row}
+
+
+class PolicyUpsert(BaseModel):
+    """A new live policy version (LIVE_EVAL_WEDGE_PLAN §2)."""
+    mode : str        = "log_only"   # log_only | enforce
+    rules: list[dict] = []
+
+    @field_validator('mode')
+    @classmethod
+    def check_mode(cls, v: str) -> str:
+        if v not in ("log_only", "enforce"):
+            raise ValueError("mode must be 'log_only' or 'enforce'")
+        return v
+
+
+@app.post("/agents/{agent_id}/policies", status_code=201)
+def create_agent_policy(
+    agent_id: str,
+    body    : PolicyUpsert,
+    user_id : str = Depends(verify_api_key),
+):
+    """
+    Create a new policy version for an agent (LIVE_EVAL_WEDGE_PLAN §2).
+
+    Versions are append-only and monotonically increasing; the highest version
+    is the active one. Ship policies in `log_only` first (the default) — the
+    dashboard shows "would-have-blocked" diffs — then re-POST with
+    `mode: "enforce"` once you trust it. Zero-risk adoption path.
+    """
+    _validate_id(agent_id, "agent_id")
+    db = get_db()
+    try:
+        prev = (
+            db.table("live_policies")
+            .select("version")
+            .eq("user_id", user_id)
+            .eq("agent_id", agent_id)
+            .order("version", desc=True)
+            .limit(1)
+            .execute()
+        )
+        next_version = ((prev.data or [{}])[0].get("version") or 0) + 1
+        db.table("live_policies").insert({
+            "user_id" : user_id,
+            "agent_id": agent_id,
+            "version" : next_version,
+            "mode"    : body.mode,
+            "rules"   : body.rules,
+        }).execute()
+    except Exception as exc:
+        if "PGRST205" in str(exc):
+            raise HTTPException(status_code=503, detail="live_policies table missing — run sdk/schema.sql")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"agent_id": agent_id, "version": next_version, "mode": body.mode, "rules": body.rules}
+
+
+@app.get("/agents/{agent_id}/live/verdicts")
+def list_live_verdicts(
+    agent_id: str,
+    limit   : int = Query(100, ge=1, le=500),
+    user_id : str = Depends(verify_api_key),
+):
+    """
+    Recent live verdicts for an agent — the shadow-mode audit trail
+    (LIVE_EVAL_WEDGE_PLAN §5.3). Powers the "would-have-blocked N runs" diff and
+    the ROI tile. Returns a summary plus the recent rows.
+    """
+    db = get_db()
+    try:
+        resp = (
+            db.table("live_verdicts")
+            .select("step_index, action, score, confidence, reasons, latency_ms, episode_id, created_at")
+            .eq("user_id", user_id)
+            .eq("agent_id", agent_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+    except Exception as exc:
+        if "PGRST205" in str(exc):
+            raise HTTPException(status_code=503, detail="live_verdicts table missing — run sdk/schema.sql")
+        raise HTTPException(status_code=500, detail=str(exc))
+    rows = resp.data or []
+    summary = {a: 0 for a in ("allow", "warn", "escalate", "block")}
+    for r in rows:
+        summary[r.get("action", "allow")] = summary.get(r.get("action", "allow"), 0) + 1
+    return {"agent_id": agent_id, "count": len(rows), "summary": summary, "verdicts": rows}
 
 
 @app.get("/episodes")
@@ -1485,10 +1718,10 @@ def _assert_episode_owned(db, episode_id: str, user_id: str) -> None:
     if resp.data[0]["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this episode")
 
-from api.synthetic import router as synthetic_router
-from api.redteam import router as redteam_router
 from api.datasets import router as datasets_router
 from api.failures import router as failures_router
+from api.redteam import router as redteam_router
+from api.synthetic import router as synthetic_router
 
 app.include_router(synthetic_router)
 app.include_router(redteam_router)

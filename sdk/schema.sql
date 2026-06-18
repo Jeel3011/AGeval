@@ -525,6 +525,72 @@ create table if not exists drift_alerts (
 create index if not exists idx_drift_alerts_cluster
     on drift_alerts (cluster_id, detected_at desc);
 
+-- ---- live evaluation (the wedge) ------------------------------------
+-- LIVE_EVAL_WEDGE_PLAN: turn retrospective memory into an in-the-loop verdict.
+
+-- Declarative, versioned policies controlling what a live verdict DOES.
+-- Phase A ships the audit/verdict path; policies (Phase B) consume it.
+-- Safety default: absence of a policy = allow. AGeval never makes an agent
+-- *more* broken than it was without one.
+create table if not exists live_policies (
+    id          uuid        primary key default gen_random_uuid(),
+    user_id     text        not null,
+    agent_id    text        not null,
+    version     int         not null default 1,
+    mode        text        not null default 'log_only',   -- log_only | enforce
+    rules       jsonb       not null default '[]'::jsonb,   -- ordered when/do list
+    created_at  timestamptz not null default now(),
+
+    unique (user_id, agent_id, version)
+);
+
+create index if not exists idx_live_policies_agent
+    on live_policies (user_id, agent_id, version desc);
+
+-- Every live verdict, for shadow diffs / ROI / replay / audit. Logs hashes and
+-- reasons, not raw inputs (privacy stance), unless the user opts in later.
+create table if not exists live_verdicts (
+    id                uuid        primary key default gen_random_uuid(),
+    user_id           text        not null,
+    agent_id          text        not null,
+    episode_id        text,
+    step_index        int,
+    input_hash        text,
+    action            text        not null,        -- allow | warn | block | escalate
+    score             numeric,
+    confidence        numeric,
+    reasons           jsonb,
+    matched_signature uuid        references failure_memory(id) on delete set null,
+    latency_ms        int,
+    created_at        timestamptz not null default now()
+);
+
+create index if not exists idx_live_verdicts_agent
+    on live_verdicts (user_id, agent_id, created_at desc);
+
+-- Per-(agent, tool, field) numeric INPUT distributions, mined from successful
+-- runs by the clustering job. Distinct from cluster_baselines (which holds
+-- *score* stats): this profiles what a *normal tool input* looks like, so the
+-- live baseline-outlier layer can flag "charge amount 100x the usual".
+create table if not exists tool_input_baselines (
+    user_id     text        not null,
+    agent_id    text        not null,
+    tool_name   text        not null,
+    field       text        not null,
+    n           int         not null,
+    mean        numeric,
+    std         numeric,
+    p10         numeric,
+    p50         numeric,
+    p90         numeric,
+    updated_at  timestamptz not null default now(),
+
+    primary key (user_id, agent_id, tool_name, field)
+);
+
+create index if not exists idx_tool_input_baselines_agent
+    on tool_input_baselines (user_id, agent_id);
+
 
 -- ============================================================
 -- ROW LEVEL SECURITY (RLS) — v3
@@ -865,6 +931,50 @@ create policy drift_alerts_select on drift_alerts
               and c.user_id = current_user_id()
         )
     );
+
+
+-- ---- live_policies --------------------------------------------------
+-- Owned directly by the user; full CRUD from the dashboard.
+alter table live_policies enable row level security;
+
+drop policy if exists live_policies_select on live_policies;
+create policy live_policies_select on live_policies
+    for select using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists live_policies_insert on live_policies;
+create policy live_policies_insert on live_policies
+    for insert with check (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists live_policies_update on live_policies;
+create policy live_policies_update on live_policies
+    for update using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists live_policies_delete on live_policies;
+create policy live_policies_delete on live_policies
+    for delete using (user_id = current_user_id());
+
+
+-- ---- live_verdicts --------------------------------------------------
+-- Written by the API on every /evaluate (under the request's user_id); read
+-- by users for shadow diffs / ROI.
+alter table live_verdicts enable row level security;
+
+drop policy if exists live_verdicts_select on live_verdicts;
+create policy live_verdicts_select on live_verdicts
+    for select using (user_id = current_user_id() or current_user_id() = '');
+
+drop policy if exists live_verdicts_insert on live_verdicts;
+create policy live_verdicts_insert on live_verdicts
+    for insert with check (user_id = current_user_id() or current_user_id() = '');
+
+
+-- ---- tool_input_baselines -------------------------------------------
+-- Written by the clustering job (service_role, bypasses RLS); read by users.
+alter table tool_input_baselines enable row level security;
+
+drop policy if exists tool_input_baselines_select on tool_input_baselines;
+create policy tool_input_baselines_select on tool_input_baselines
+    for select using (user_id = current_user_id() or current_user_id() = '');
 
 
 -- ============================================================

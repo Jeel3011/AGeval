@@ -72,6 +72,67 @@ def _classify(exc: Exception):
     return classify_error(exc)
 
 
+# ---------------------------------------------------------------------------
+# Live guard (LIVE_EVAL_WEDGE_PLAN §3.2) — zero-code, opt-in via AGEVAL_GUARD=1.
+# When on, a tool call is evaluated against the agent's live memory BEFORE it
+# runs; an enforce-mode policy that returns `block` raises AgevalBlocked so the
+# framework hands the model a tool error and it self-corrects. Off by default
+# (pure tracing); fails OPEN on any evaluator error so it can't break the host.
+# ---------------------------------------------------------------------------
+class AgevalBlocked(Exception):
+    """Raised by the auto-guard when a live policy blocks a tool call.
+
+    Carries the verdict so a caller (or the framework's tool-error path) can
+    surface the reason and any repair suggestion back to the model.
+    """
+    def __init__(self, verdict, tool_name: str):
+        self.verdict = verdict
+        self.tool_name = tool_name
+        reason = verdict.explain() if hasattr(verdict, "explain") else str(verdict)
+        super().__init__(f"AGeval blocked '{tool_name}': {reason}")
+
+
+def _guard_enabled() -> bool:
+    return os.environ.get("AGEVAL_GUARD", "0") in ("1", "true", "True")
+
+
+def _guard_tool(agent_id: str, tool_name: str, tool_input, tools_so_far: list[str] | None):
+    """Evaluate a proposed tool call; raise AgevalBlocked if a policy blocks it.
+
+    Best-effort and fail-open: any error (unconfigured, network, bad response)
+    means the tool proceeds. Only an explicit `block` action raises.
+    """
+    if not _guard_enabled() or not _api_configured():
+        return
+    try:
+        resp = _post("/evaluate", {
+            "agent_id": agent_id,
+            "tool_name": tool_name,
+            "tool_input": _guard_serialize(tool_input),
+            "tools_so_far": tools_so_far,
+        }, swallow=True)
+        if not resp:
+            return
+        from ageval.session import Verdict
+        verdict = Verdict.from_dict(resp)
+        if verdict.action == "block":
+            raise AgevalBlocked(verdict, tool_name)
+    except AgevalBlocked:
+        raise
+    except Exception as exc:  # fail open — never break the host on a guard error
+        log.debug(f"[ageval.auto] guard check failed open for {tool_name}: {exc}")
+
+
+def _guard_serialize(value):
+    """Coerce a tool input to a JSON-safe value for the verdict request."""
+    import json
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
 # ===========================================================================
 # OpenAI / Anthropic client patches
 # ===========================================================================
@@ -267,7 +328,10 @@ class _AutoEpisodeCallback(_make_auto_callback_base()):  # type: ignore[misc]
             episode_id = f"ep_{uuid.uuid4().hex[:16]}"
             name = (serialized or {}).get("name") or "langchain_agent"
             with self._lock:
-                self._episodes[str(run_id)] = {"episode_id": episode_id, "counter": 0}
+                self._episodes[str(run_id)] = {
+                    "episode_id": episode_id, "counter": 0,
+                    "agent_id": name, "tools": [],
+                }
             _post("/episodes", {"episode_id": episode_id, "agent_id": name,
                                 "task": _short(inputs)}, swallow=True)
         except Exception as exc:
@@ -299,12 +363,25 @@ class _AutoEpisodeCallback(_make_auto_callback_base()):  # type: ignore[misc]
     # -- tool capture ------------------------------------------------------
     def on_tool_start(self, serialized, input_str, *, run_id=None, parent_run_id=None, **kw):
         try:
+            tool_name = (serialized or {}).get("name", "unknown")
+            root = self._root_for(parent_run_id, run_id)
             self._tool_starts[str(run_id)] = {
-                "name": (serialized or {}).get("name", "unknown"),
+                "name": tool_name,
                 "input": input_str,
                 "t0": time.perf_counter(),
-                "root": self._root_for(parent_run_id, run_id),
+                "root": root,
             }
+            # Live guard (opt-in): evaluate BEFORE the tool runs. Raising here
+            # aborts the tool call; LangChain routes the error back to the model.
+            if _guard_enabled():
+                ep = self._episodes.get(root) if root else None
+                agent_id = (ep or {}).get("agent_id", "langchain_agent")
+                tools_so_far = list((ep or {}).get("tools", [])) + [tool_name]
+                _guard_tool(agent_id, tool_name, input_str, tools_so_far)
+                if ep is not None:
+                    ep.setdefault("tools", []).append(tool_name)
+        except AgevalBlocked:
+            raise  # propagate the block into the framework's tool-error path
         except Exception:
             pass
 

@@ -45,7 +45,7 @@ Fallback:
 """
 
 # Framework-agnostic (works with ANY agent)
-from ageval.session import AgentSession, trace_callable, classify_error
+from ageval.session import AgentSession, Verdict, trace_callable, classify_error
 
 # Custom metrics + built-in metric catalogue
 from ageval.metrics import (
@@ -108,6 +108,7 @@ except ImportError:  # pragma: no cover - defensive
 __all__ = [
     # Universal
     "AgentSession",
+    "Verdict",
     "trace_callable",
     "classify_error",
     # Metric registry

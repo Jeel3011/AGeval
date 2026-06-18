@@ -151,3 +151,51 @@ def test_langchain_guard_blocks_double_record(monkeypatch):
     monkeypatch.setattr(auto, "_LC_HANDLER", _Handler())
     auto._record_llm_step("openai_auto", "t", {}, {"content_preview": "x"}, 1)
     assert posted == [], "must defer to the LangChain callback when an episode is open"
+
+
+# ---------------------------------------------------------------------------
+# Live guard (LIVE_EVAL_WEDGE_PLAN §3.2) — opt-in via AGEVAL_GUARD=1
+# ---------------------------------------------------------------------------
+def test_guard_disabled_by_default(monkeypatch):
+    """Without AGEVAL_GUARD, _guard_tool never calls /evaluate (pure tracing)."""
+    import ageval.auto as auto
+    monkeypatch.delenv("AGEVAL_GUARD", raising=False)
+    monkeypatch.setattr(auto, "_api_configured", lambda: True)
+    calls = []
+    monkeypatch.setattr(auto, "_post", lambda *a, **k: calls.append(a))
+    auto._guard_tool("agent", "charge", {"amount": 9}, ["charge"])
+    assert calls == []
+
+
+def test_guard_blocks_on_block_verdict(monkeypatch):
+    """With the guard on, a 'block' verdict raises AgevalBlocked."""
+    import ageval.auto as auto
+    monkeypatch.setenv("AGEVAL_GUARD", "1")
+    monkeypatch.setattr(auto, "_api_configured", lambda: True)
+    monkeypatch.setattr(auto, "_post", lambda *a, **k: {"action": "block", "score": 0.1,
+                                                        "reasons": [{"message": "known failure"}]})
+    with pytest.raises(auto.AgevalBlocked) as ei:
+        auto._guard_tool("agent", "charge", {"amount": 9999}, ["charge"])
+    assert ei.value.tool_name == "charge"
+    assert ei.value.verdict.action == "block"
+
+
+def test_guard_allows_on_non_block_verdict(monkeypatch):
+    """warn / escalate / allow do NOT raise — the tool proceeds."""
+    import ageval.auto as auto
+    monkeypatch.setenv("AGEVAL_GUARD", "1")
+    monkeypatch.setattr(auto, "_api_configured", lambda: True)
+    for action in ("allow", "warn", "escalate"):
+        monkeypatch.setattr(auto, "_post", lambda *a, _x=action, **k: {"action": _x})
+        auto._guard_tool("agent", "charge", {"amount": 9}, ["charge"])  # must not raise
+
+
+def test_guard_fails_open_on_error(monkeypatch):
+    """A guard/evaluator error must never raise into the host — fail open."""
+    import ageval.auto as auto
+    monkeypatch.setenv("AGEVAL_GUARD", "1")
+    monkeypatch.setattr(auto, "_api_configured", lambda: True)
+    def _boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(auto, "_post", _boom)
+    auto._guard_tool("agent", "charge", {"amount": 9}, ["charge"])  # must not raise

@@ -247,5 +247,14 @@ def _cluster_for_agent(client, user_id: str, agent_id: str):
         except Exception as e:
             log.warning(f"procedural_memory mining failed for cluster {cluster_id}: {e}")
 
+    # Mine numeric tool-input baselines for this agent (once, across all its
+    # episodes — these are per-agent, not per-cluster). Feeds the live verdict's
+    # baseline-outlier layer (LIVE_EVAL_WEDGE_PLAN §1). Best-effort.
+    try:
+        from merger.input_baselines import mine_input_baselines
+        mine_input_baselines(client, user_id, agent_id)
+    except Exception as e:
+        log.warning(f"tool_input_baselines mining failed for agent {agent_id}: {e}")
+
     # Old clusters that were not matched can be ignored or deleted
     # We will leave them for drift detection history, or they could be deleted if episode_count = 0.
