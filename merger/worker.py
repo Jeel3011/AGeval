@@ -427,5 +427,55 @@ def run():
     log.info("Worker stopped cleanly")
 
 
+def drain_once(client=None, max_jobs: int = 100, run_periodic: bool = True) -> dict:
+    """Process all currently-pending jobs and return, instead of looping forever.
+
+    This is what free serverless/cron hosts call (e.g. POST /drain triggered by
+    cron-job.org every 60s) so we never need an always-on worker process.
+
+    It reuses the exact same pick_job / process_job / reclaim / cluster / drift
+    code paths as run(), just without the blocking poll loop.
+
+    Returns a small summary dict for the HTTP response / cron logs.
+    """
+    client = client or get_client()
+    processed = 0
+
+    # The periodic maintenance the loop normally does on a cadence. On a 60s cron
+    # cadence, running these once per drain is the right frequency.
+    if run_periodic:
+        try:
+            reclaim_stale_jobs(client)
+        except Exception as exc:
+            log.warning(f"reclaim_stale_jobs failed during drain: {exc}")
+
+    # Drain the queue: keep grabbing jobs until empty or we hit the safety cap.
+    while processed < max_jobs:
+        job = pick_job(client)
+        if job is None:
+            break
+        process_job(client, job)
+        processed += 1
+
+    if run_periodic:
+        try:
+            run_clustering(client)
+        except Exception as exc:
+            log.warning(f"clustering failed during drain: {exc}")
+        try:
+            from merger.drift import run_drift_alerts
+            run_drift_alerts(client, scorer="custom")
+        except Exception as exc:
+            log.warning(f"drift sweep failed during drain: {exc}")
+
+    log.info(f"Drain complete: {processed} job(s) processed")
+    return {"processed": processed, "drained": job is None}
+
+
 if __name__ == "__main__":
-    run()
+    import sys
+
+    if "--once" in sys.argv or os.environ.get("AGEVAL_DRAIN_ONCE") == "1":
+        drain_once()
+    else:
+        run()

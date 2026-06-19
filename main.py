@@ -496,6 +496,37 @@ def metrics():
 
 ADMIN_SECRET = os.environ.get("AGEVAL_ADMIN_SECRET")  # NO default — must be explicitly set
 
+
+@app.post("/drain")
+async def drain(
+    x_admin_secret: str = Header(None, description="Admin secret required to trigger a drain"),
+):
+    """
+    Process all pending episode_jobs and return.
+
+    This replaces the always-on merger worker for free/serverless hosting:
+    an external scheduler (e.g. cron-job.org) POSTs here every ~60s with the
+    admin secret, and we drain the queue once. No 24/7 process required.
+
+    SECURITY: disabled unless AGEVAL_ADMIN_SECRET is set; requires it in the
+    X-Admin-Secret header. Safe to call concurrently — pick_job uses
+    SELECT ... FOR UPDATE SKIP LOCKED so overlapping drains never double-process.
+    """
+    if not ADMIN_SECRET:
+        raise HTTPException(
+            status_code=403,
+            detail="Drain is disabled. AGEVAL_ADMIN_SECRET is not configured on this server.",
+        )
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid admin secret")
+
+    from merger.worker import drain_once
+    # drain_once is blocking (sync Supabase + scoring), so run it off the event loop.
+    import anyio
+    result = await anyio.to_thread.run_sync(drain_once)
+    return result
+
+
 @app.post("/register", status_code=201)
 def register(
     body: RegisterRequest,

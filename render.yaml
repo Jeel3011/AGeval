@@ -1,0 +1,37 @@
+# Render Blueprint — free deployment of the AGeval API.
+#
+# This deploys ONLY the API as a free web service. There is no always-on
+# worker service (free tiers can't run one cheaply): instead, the merger queue
+# is drained by POST /drain, which you trigger every ~60s from cron-job.org
+# (see DEPLOY_FREE.md). Redis comes from Upstash (free) via the REDIS_URL env var.
+#
+# To deploy:
+#   1. Push this repo to GitHub.
+#   2. Render Dashboard → New → Blueprint → pick this repo.
+#   3. Fill in the env vars marked `sync: false` below when prompted.
+services:
+  - type: web
+    name: ageval-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Supabase — backend the API talks to (set in Render dashboard).
+      - key: AGEVAL_SUPABASE_URL
+        sync: false
+      - key: AGEVAL_SUPABASE_SERVICE_KEY
+        sync: false
+      # Admin secret — protects /register AND /drain. Generate a strong random value.
+      - key: AGEVAL_ADMIN_SECRET
+        generateValue: true
+      # Upstash Redis URL for the rate limiter (rediss://... from Upstash console).
+      # Leave unset to fall back to in-memory rate limiting.
+      - key: REDIS_URL
+        sync: false
+      # Optional — embeddings + LLM judge during drain.
+      - key: OPENAI_API_KEY
+        sync: false
+      # Lock CORS to your Vercel dashboard origin in production (e.g. https://ageval.vercel.app).
+      - key: AGEVAL_CORS_ORIGINS
+        sync: false
