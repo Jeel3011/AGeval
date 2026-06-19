@@ -1,0 +1,8 @@
+# Don't upload local build artifacts — Vercel builds fresh on its side.
+# These bloated the CLI upload past the 100 MB limit.
+.next
+out
+node_modules
+.vercel
+*.tsbuildinfo
+coverage
