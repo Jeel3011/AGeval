@@ -1,8 +1,12 @@
 # AGeval
 
-**Is your agent getting better or worse?**
+**The autopilot for AI agents — not a flight recorder.**
 
-AGeval is an episodic evaluation framework for LLM agents with persistent evaluation memory. One import gives you full observability: every tool call traced, every run scored, and a four-layer memory system that learns from every episode. Works with any agent framework — including LangGraph, CrewAI, AutoGen, MCP, OpenAI, and Anthropic. Go from zero to your first evaluated episode in under 5 minutes.
+Every other eval tool (LangSmith, Langfuse, Braintrust, Arize) is *retrospective*: observe → ingest → score later. By the time you see the number, the bad output already shipped. AGeval renders a trustworthy verdict **mid-run** — scoring each step *as it happens* against four layers of evaluation memory — and hands the agent an actionable `allow / warn / escalate / block` so it can repair, route to review, or stop **before** bad output reaches a user.
+
+It's also a full episodic evaluation framework: one import traces every tool call, scores every run with 28 built-in metrics + 3 scorers, and remembers every episode. Works with any framework — LangGraph, CrewAI, AutoGen, MCP, OpenAI, Anthropic, or fully custom. Zero to your first evaluated episode in under 5 minutes.
+
+Proven on a **real fleet of 142 agents across 20 industry verticals** hitting **live public APIs** (SEC EDGAR, openFDA, ClinicalTrials, FX, transit, …) plus **20 elaborate multi-stage workflows** — not toy demos.
 
 [![CI](https://github.com/Jeel3011/AGeval/actions/workflows/ci.yml/badge.svg)](https://github.com/Jeel3011/AGeval/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
@@ -14,6 +18,7 @@ AGeval is an episodic evaluation framework for LLM agents with persistent evalua
 
 | Problem | AGeval Solution |
 |---------|----------------|
+| "Can I stop a bad run *before* it ships output?" | **Live in-the-loop verdict** — `session.evaluate_step()` scores a step against memory in-process (no LLM) and returns `allow/warn/escalate/block` to act on |
 | "Is my agent getting better or worse?" | **28 built-in metrics** + 3 independent scorers — every run gets a reliability number |
 | "What happened in that failed run?" | **Full trace** — every tool call, input, output, latency, reasoning |
 | "Has my agent seen a task like this before?" | **Episodic memory** — pgvector similarity search across all past runs |
@@ -36,6 +41,34 @@ pip install ageval-sdk[anthropic]   # For Anthropic (Claude) agents
 pip install ageval-sdk[otel]        # For OpenTelemetry export
 pip install ageval-sdk[all]         # Everything
 ```
+
+---
+
+## Live, in-the-loop evaluation (the wedge)
+
+Ask for a verdict **before** a step runs, and branch on it:
+
+```python
+from ageval import AgentSession
+
+s = AgentSession(agent_id="credit_analyst_v1")
+s.start()
+
+# BEFORE you execute a tool, score the proposed step against memory:
+v = s.evaluate_step("process_payment", {"amount": 4200},
+                    reasoning="charge the order total")
+
+if v.action == "escalate":        # matches a known failure / big outlier
+    route_to_human(v.explain())   # "matches known failure · charge before verify"
+elif v.action == "warn":          # off the golden path, mild anomaly
+    log.warning(v.explain())
+else:
+    process_payment(amount=4200)  # allow → proceed
+```
+
+`evaluate_step()` is **in-process and LLM-free** (cosine vs failure signatures, z-score vs baselines, golden-path adherence) so it sits in the hot path. It **fails open** (returns `allow`) if AGeval is unreachable. Shadow-first by default: verdicts are advisory until you opt a policy into enforce mode, and a policy can only ever make actions *stricter*, never looser.
+
+Want zero code changes? Set `AGEVAL_GUARD=1` and `import ageval.auto` — each LangChain tool call is evaluated in `on_tool_start` and an enforce-mode `block` raises `AgevalBlocked` before the tool runs.
 
 ---
 
@@ -273,6 +306,36 @@ response = guarded.messages.create(model="claude-haiku-4-5-20251001", ...)
 
 ---
 
+## The real fleet — 142 agents on live APIs
+
+Beyond the local-toolkit reference agents below, `examples/agents/fleet/` is a fleet of **142 real business agents across 20 industry verticals**, each running a real OpenAI brain against **live external APIs** — and recorded as scored AGeval episodes. No toy demos: a credit analyst pulling SEC EDGAR 10-Ks, a pharmacovigilance bot scanning openFDA recalls, a logistics planner hitting live transit data.
+
+- **`real_tools.py`** — ~40 real read tools (SEC EDGAR, openFDA, ClinicalTrials, USGS, arXiv, Crossref, CoinGecko, World Bank, NHTSA, CityBikes, …) behind a polite HTTP client (declared User-Agent, per-host rate limiting, backoff, no caching).
+- **`sideeffects.py`** — real side-effecting tools (Supabase write, is.gd short links, QR, webhooks; gated email/Slack) behind a master `AGEVAL_LIVE_SIDE_EFFECTS=1` switch + honest per-tool credential gate.
+- **`fleet/registry.py` + `factory.py`** — 142 declarative `AgentSpec`s → real traced episodes.
+- **`fleet/run_fleet.py`** — sweeps the fleet under a hard USD cap (`OpenAIBudgetGuard`) with per-host rate limiting; prints a vertical × framework coverage matrix.
+- **`fleet/flagships/`** — hand-written framework-depth agents (LangGraph StateGraph + ReAct, MCP, zero-code `import ageval.auto`).
+
+```bash
+python -m examples.agents.real_tools                              # prove the tools are live (re-run → values change)
+python -m examples.agents.fleet.run_fleet --only finance_banking  # one vertical, real episodes
+python -m examples.agents.fleet.run_fleet --sample 1 --cap 1.50   # ~1 agent/vertical under a budget
+```
+
+### 20 elaborate multi-stage workflows
+
+`examples/agents/fleet/workflows/` holds **20 real-life workflows** — several live tool stages that feed each other, an LLM synthesis, and sometimes a real side-effect action. Each run is a ≥4-step trajectory scored against the golden path (M&A diligence, property underwriting, drug-safety triage, supply-chain incident response, compliance monitor, …).
+
+```bash
+# --explain streams the live verdict + rationale per stage ("watch the eval think")
+python -m examples.agents.fleet.workflows.run_workflows --only wf.finance.ma_diligence --explain
+python -m examples.agents.fleet.workflows.run_workflows --cap 2.00   # all 20, under budget
+```
+
+See [`examples/agents/fleet/README.md`](examples/agents/fleet/README.md) and [`examples/agents/fleet/workflows/README.md`](examples/agents/fleet/workflows/README.md).
+
+---
+
 ## Example Agents (22 reference implementations)
 
 All examples live in `examples/agents/` and share a common toolkit (`toolkit.py`) with 20+ realistic production tools — HTTP, SQL, vector search, payments, file I/O, code execution, calendar, Slack, and more.
@@ -327,16 +390,22 @@ python examples/agents/run_all.py
 
 ## Dashboard
 
-The Next.js 14 frontend has 17 pages.
+The Next.js 14 frontend leads with the live-evaluation surface.
+
+### Guardrails (live evaluation)
+
+| Page | Description |
+|---|---|
+| `/` | Landing — autopilot hero with a live verdict-stream demo, the wedge (flight-recorder vs autopilot), animated 142-agent fleet grid + 20-workflow showcase |
+| `/live-eval` | **Live Eval** — two tabs: **Recorded** (verdict trail + score provenance per episode, via `GET /episodes/{id}/explain`) and **Run live** (stream a verdict per step from `POST /evaluate/stream`; "Deviate from golden path" to watch a `warn` fire) |
 
 ### Overview & Traces
 
 | Page | Description |
 |---|---|
-| `/` | Landing page — animated episode replay hero, 4-layer memory explainer, 6-framework coverage |
 | `/dashboard` | KPI aggregate — outcomes, avg scores per scorer, failure rate, latency |
 | `/traces` | Full episode list with real-time search (ID / task / agent ID) and outcome filter |
-| `/episodes/[id]` | Single episode — step timeline, reasoning, tool inputs/outputs, all scorer breakdowns |
+| `/episodes/[id]` | Single episode — step timeline, reasoning, tool inputs/outputs, all scorer breakdowns, plus a **"Why this score →"** deep-link to the provenance view |
 
 ### Evaluation Memory
 
@@ -383,6 +452,7 @@ GET  /overview                          — KPI aggregate: outcomes, avg score, 
 GET  /episodes                          — list episodes (filter: ?agent_id= &outcome=)
 GET  /episodes/{id}                     — full detail + steps + scores + relative_scores
 GET  /episodes/{id}/steps               — paginated steps
+GET  /episodes/{id}/explain             — score provenance: metrics ranked by shortfall, step evidence, live verdict trail
 GET  /agents                            — distinct agent_ids for the authenticated user
 GET  /trends?agent_id=X                 — score time-series (scorer = rules | custom | llm_judge)
 GET  /metrics/catalogue                 — list all 28 built-in metrics + descriptions
@@ -392,6 +462,15 @@ GET  /compare?episode_a=X&episode_b=Y   — trajectory diff + pairwise judgment
 GET  /jobs/{id}/status                  — poll merge/scoring job
 GET  /health                            — liveness probe
 GET  /metrics                           — operational metrics (requests, latencies)
+```
+
+### Live evaluation (the wedge)
+```
+POST /evaluate                          — in-the-loop verdict for one proposed step (allow/warn/escalate/block)
+POST /evaluate/stream                   — SSE: stream a verdict per step for a proposed trajectory
+GET  /agents/{id}/policies              — append-only enforcement policies (highest version = active)
+POST /agents/{id}/policies              — publish a new policy version (log_only | enforce)
+GET  /agents/{id}/live/verdicts         — shadow-mode verdict audit trail + summary
 ```
 
 ### Evaluation Memory

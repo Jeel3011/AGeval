@@ -1028,6 +1028,93 @@ def evaluate_live(
     return verdict.to_dict()
 
 
+class EvaluateStreamRequest(BaseModel):
+    """Replay a proposed step sequence and stream a live verdict per step.
+
+    Powers the dashboard's "Run live" view (watch the eval think): the client
+    sends an agent_id and the ordered steps a workflow is about to take; the
+    server loads the agent's memory snapshot ONCE and emits one SSE event per
+    step, each carrying the real verdict from the live engine (failure-signature
+    / baseline / golden-path layers). This is the real verdict engine evaluating
+    a trajectory live — the same code path as POST /evaluate, streamed.
+    """
+    agent_id: str
+    steps: list[dict]   # [{tool_name, tool_input?, reasoning?}, ...]
+
+    @field_validator('agent_id')
+    @classmethod
+    def _check_agent(cls, v: str) -> str:
+        return _validate_id(v, 'agent_id')
+
+
+@app.post("/evaluate/stream")
+def evaluate_stream(
+    body    : EvaluateStreamRequest,
+    user_id : str = Depends(verify_api_key),
+):
+    """Stream per-step live verdicts (Server-Sent Events) for a proposed run."""
+    from fastapi.responses import StreamingResponse
+
+    from eval.live import evaluate_step as _live_eval
+    from eval.live import load_snapshot
+
+    db = get_db()
+    steps = body.steps[:50]   # bound the work
+
+    def _gen():
+        import time as _t
+
+        try:
+            snap = load_snapshot(db, user_id, body.agent_id)
+        except Exception as exc:  # fail open — emit a cold snapshot notice
+            snap = None
+            yield _sse({"event": "warning", "message": f"snapshot load failed: {exc}"})
+
+        # A one-line memory summary so the UI can show whether verdicts have teeth.
+        mem = {
+            "signatures": len(snap.signatures) if snap else 0,
+            "has_golden": bool(snap and snap.golden),
+            "numeric_baselines": len(snap.numeric_baselines) if snap else 0,
+        }
+        yield _sse({"event": "start", "agent_id": body.agent_id, "memory": mem,
+                    "total_steps": len(steps)})
+
+        tools_so_far: list[str] = []
+        for i, st in enumerate(steps):
+            tool = st.get("tool_name") or st.get("tool") or "step"
+            tool_input = st.get("tool_input")
+            reasoning = st.get("reasoning")
+            tools_so_far.append(tool)
+
+            t0 = _t.perf_counter()
+            try:
+                embedding = None
+                if snap and snap.signatures:
+                    intent = " ".join(filter(None, [tool, str(tool_input) if tool_input else None, reasoning]))
+                    embedding = _generate_embedding(intent)
+                verdict = _live_eval(snap, tool_name=tool, tool_input=tool_input,
+                                     step_embedding=embedding, tools_so_far=list(tools_so_far)) \
+                    if snap else None
+                payload = verdict.to_dict() if verdict else {"action": "allow", "score": 1.0, "confidence": 0.0, "reasons": []}
+            except Exception as exc:
+                payload = {"action": "allow", "score": 1.0, "confidence": 0.0,
+                           "reasons": [{"layer": "error", "message": str(exc)}]}
+            payload.update({"event": "verdict", "step_index": i, "tool_name": tool,
+                            "reasoning": reasoning,
+                            "latency_ms": int((_t.perf_counter() - t0) * 1000)})
+            yield _sse(payload)
+
+        yield _sse({"event": "done", "steps": len(steps)})
+
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _sse(obj: dict) -> str:
+    import json as _json
+    return f"data: {_json.dumps(obj)}\n\n"
+
+
 def _log_live_verdict(db, user_id: str, body: "EvaluateRequest", verdict) -> None:
     """Best-effort insert into live_verdicts (skips silently if table absent)."""
     try:
@@ -1376,6 +1463,118 @@ def get_episode_steps(
         .execute()
     )
     return {"episode_id": episode_id, "steps": resp.data or [], "limit": limit, "offset": offset}
+
+
+def _score_provenance(scores: list[dict]) -> list[dict]:
+    """Rank each scorer's metrics by shortfall (1.0 - value) so the biggest
+    score-draggers surface first. Pure function — unit-tested directly."""
+    provenance = []
+    for s in scores:
+        breakdown = s.get("breakdown") or {}
+        contribs = []
+        for metric, val in breakdown.items():
+            if isinstance(val, (int, float)):
+                contribs.append({
+                    "metric": metric,
+                    "value": round(float(val), 4),
+                    "shortfall": round(max(0.0, 1.0 - float(val)), 4),
+                })
+        contribs.sort(key=lambda c: c["shortfall"], reverse=True)
+        provenance.append({
+            "scorer": s.get("scorer"),
+            "score": s.get("score"),
+            "top_drivers": contribs[:5],
+            "all_metrics": contribs,
+        })
+    return provenance
+
+
+@app.get("/episodes/{episode_id}/explain")
+def explain_episode(
+    episode_id: str,
+    user_id   : str = Depends(verify_api_key),
+):
+    """Score provenance — *why* this episode scored the way it did.
+
+    Transparency endpoint (Phase 2B): for each scorer it ranks the metrics by
+    how much they moved the score, attaches the steps as evidence (tools used,
+    failures + their classification), and replays the live in-the-loop verdicts
+    that were rendered DURING the run (from `live_verdicts`). Everything here is
+    derived from data already recorded — no re-scoring.
+    """
+    db = get_db()
+    _assert_episode_owned(db, episode_id, user_id)
+
+    ep_resp = (
+        db.table("episodes").select("*").eq("episode_id", episode_id).limit(1).execute()
+    )
+    if not ep_resp.data:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+    steps = (
+        db.table("episode_steps")
+        .select("step_index, tool_name, success, error_category, is_recoverable, reasoning, latency_ms")
+        .eq("episode_id", episode_id).order("step_index").execute()
+    ).data or []
+
+    scores = (
+        db.table("episode_scores")
+        .select("scorer, score, breakdown, created_at")
+        .eq("episode_id", episode_id).execute()
+    ).data or []
+
+    # Rank each scorer's metrics by contribution (how far from a perfect 1.0).
+    provenance = _score_provenance(scores)
+
+    # Step evidence: which tools ran, which failed and why.
+    failures = [
+        {"step_index": st["step_index"], "tool": st["tool_name"],
+         "error_category": st.get("error_category"), "recoverable": st.get("is_recoverable")}
+        for st in steps if not st.get("success")
+    ]
+    tools_used = [st["tool_name"] for st in steps]
+
+    # The live verdict trail rendered DURING the run (best-effort; table optional).
+    verdict_trail = []
+    try:
+        vt = (
+            db.table("live_verdicts")
+            .select("step_index, action, score, confidence, reasons, matched_signature")
+            .eq("episode_id", episode_id).order("step_index").execute()
+        ).data or []
+        verdict_trail = vt
+    except Exception as exc:  # un-migrated DB / missing table
+        if "PGRST205" not in str(exc):
+            log.debug(f"explain: live_verdicts read skipped: {exc}")
+
+    # Plain-English headline.
+    if scores:
+        worst = min(scores, key=lambda x: x.get("score") or 1.0)
+        wb = worst.get("breakdown") or {}
+        weak = sorted(((k, v) for k, v in wb.items() if isinstance(v, (int, float))),
+                      key=lambda kv: kv[1])[:2]
+        weak_str = ", ".join(f"{k}={v:.2f}" for k, v in weak) or "no weak metrics"
+        summary = (f"{len(scores)} scorer(s); lowest is {worst.get('scorer')} at "
+                   f"{worst.get('score')}. Weakest metrics: {weak_str}. "
+                   f"{len(failures)} failed step(s) of {len(steps)}.")
+    else:
+        summary = (f"No scores yet (merge job may be pending). {len(steps)} steps recorded, "
+                   f"{len(failures)} failed.")
+
+    return JSONResponse(
+        content={
+            "episode_id": episode_id,
+            "agent_id": ep_resp.data[0].get("agent_id"),
+            "task": ep_resp.data[0].get("task"),
+            "summary": summary,
+            "score_provenance": provenance,
+            "tools_used": tools_used,
+            "failures": failures,
+            "live_verdict_trail": verdict_trail,
+            "step_count": len(steps),
+        },
+        headers={"Cache-Control": "private, max-age=15"},
+    )
 
 
 @app.get("/jobs/{episode_id}/status")

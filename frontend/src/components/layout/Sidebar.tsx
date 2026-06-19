@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Database,
   GitCompare,
+  Gauge,
   Layers,
   LayoutDashboard,
   Search,
@@ -37,6 +38,9 @@ export function Sidebar() {
         <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2">Overview</div>
         <NavItem href="/dashboard" icon={<LayoutDashboard size={18} />} label="Dashboard" active={pathname === "/dashboard"} />
         <NavItem href="/traces" icon={<Activity size={18} />} label="Traces & Logs" active={pathname === "/traces"} />
+
+        <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Guardrails</div>
+        <NavItem href="/live-eval" icon={<Gauge size={18} />} label="Live Eval" active={pathname.startsWith("/live-eval")} />
 
         <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2 px-2 mt-6">Episodes</div>
         <NavItem href="/episodes" icon={<Layers size={18} />} label="Episodes" active={pathname === "/episodes" || pathname.startsWith("/episodes/")} />

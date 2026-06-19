@@ -81,6 +81,9 @@ export default function EpisodeDetail({ params }: { params: { id: string } }) {
           <span className={`badge badge-${outcomeClass(episode.outcome)}`}>{episode.outcome}</span>
           <span style={{color:'var(--text-muted)', fontSize:14}}>{episode.agent_id}</span>
           <span style={{color:'var(--text-muted)', fontSize:14}}>· {episode.total_steps ?? steps?.length} steps · {fmtLatency(episode.total_latency_ms)}</span>
+          <Link href={`/live-eval?ep=${encodeURIComponent(id)}`} style={{marginLeft:'auto', color:'var(--accent)', fontSize:14, textDecoration:'underline'}}>
+            Why this score &rarr;
+          </Link>
         </div>
       </header>
 

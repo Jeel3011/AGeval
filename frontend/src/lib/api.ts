@@ -76,3 +76,44 @@ export async function apiPost(path: string, body?: unknown) {
 export async function apiDelete(path: string) {
   return request(path, { method: 'DELETE' });
 }
+
+/**
+ * POST a body and consume a Server-Sent Events stream, invoking `onEvent` for
+ * each `data: {…}` line as it arrives. Uses fetch (not EventSource) so we can
+ * send the Authorization header. Resolves when the stream closes.
+ */
+export async function apiPostStream(
+  path: string,
+  body: unknown,
+  onEvent: (data: any) => void,
+): Promise<void> {
+  const base = getBaseUrl();
+  const token = await getBearer();
+  if (!token) throw new ApiError('Not signed in. Please sign in to continue.', 401);
+
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new ApiError(err.detail || `HTTP ${res.status}`, res.status);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const chunks = buf.split('\n\n');
+    buf = chunks.pop() || '';
+    for (const chunk of chunks) {
+      const line = chunk.split('\n').find((l) => l.startsWith('data:'));
+      if (!line) continue;
+      try { onEvent(JSON.parse(line.slice(5).trim())); } catch { /* skip malformed */ }
+    }
+  }
+}

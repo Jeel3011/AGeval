@@ -239,6 +239,23 @@
   animation: ag-shimmer 1.6s infinite;
 }
 
+/* Fleet grid: each agent tile flickers "alive" on a staggered cycle (the
+   --d delay is set inline per tile so the wave ripples across the grid). */
+@keyframes ag-tile-live {
+  0%, 92%, 100% { background-color: rgba(255,255,255,0.55); }
+  46% { background-color: rgba(16,185,129,0.16); }
+}
+.ag-tile-live { animation: ag-tile-live 3.4s ease-in-out infinite; animation-delay: var(--d, 0ms); }
+
+/* Workflow stage flow: a dot travels the pipeline; stages light in sequence. */
+@keyframes ag-stage-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: none; }
+}
+.ag-stage-in { animation: ag-stage-in 0.4s cubic-bezier(0.22,1,0.36,1) both; animation-delay: var(--d, 0ms); }
+@keyframes ag-flow-dot { 0% { left: 0; } 100% { left: 100%; } }
+.ag-flow-dot { animation: ag-flow-dot 2.8s linear infinite; }
+
 /* ──────────────────────────────────────────────────────────────────────────
    Editorial system — bold type, generous whitespace, strong grid, monochrome.
    Shared across the whole app (hero + dashboard) so every surface reads the
@@ -334,6 +351,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ag-step-in, .ag-bar, .ag-float, .dot-live, .ag-shimmer::after,
+  .ag-tile-live, .ag-stage-in, .ag-flow-dot,
   .ed-rise, .ed-parallax { animation: none !important; }
   .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
 }

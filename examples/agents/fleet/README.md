@@ -32,6 +32,10 @@ real, and that liveness is used as a "this is not a toy" assertion.
   a vertical × framework coverage matrix.
 - [`flagships/`](flagships/) — hand-written framework-depth agents on real
   LangGraph (StateGraph + ReAct), MCP, and zero-code `import ageval.auto`.
+- [`workflows/`](workflows/) — **elaborate multi-stage workflows** (M&A diligence,
+  property underwriting, drug-safety triage, …) with **live in-eval transparency**
+  (`--explain` streams the verdict per stage; `GET /episodes/{id}/explain` gives
+  score provenance). See [workflows/README.md](workflows/README.md).
 - [`budget_openai.py`](budget_openai.py) — hard USD spend cap (OpenAI analogue of
   the Anthropic `budget_guard.py`).
 
