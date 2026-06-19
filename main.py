@@ -135,9 +135,21 @@ def _inc_metric(name: str) -> None:
 # Backend: Redis if REDIS_URL is set, in-memory otherwise.
 # Config: RATE_LIMIT_REQUESTS (default 100) / RATE_LIMIT_WINDOW (default 60s)
 # ---------------------------------------------------------------------------
+# Paths exempt from rate limiting: infra liveness/observability probes and the
+# cron-driven drain. These are hit on a fixed cadence by Render's health checker
+# and cron-job.org from a few shared internal IPs — counting them against the
+# per-IP limit would 429 the health check, make Render mark the service
+# unhealthy, and trigger a restart loop (502s). /drain is already guarded by the
+# admin secret, so it doesn't need IP rate limiting.
+_RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/metrics", "/drain"})
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     _inc_metric("requests_total")
+
+    if request.url.path in _RATE_LIMIT_EXEMPT_PATHS:
+        return await call_next(request)
 
     # Extract rate-limit key: prefer API key, fall back to IP
     auth = request.headers.get("Authorization", "")
