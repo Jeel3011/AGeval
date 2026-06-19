@@ -1,0 +1,20 @@
+# Vercel must ONLY build the Next.js dashboard in frontend/.
+# The Python backend (main.py, api/, merger/, etc.) is deployed on Render, NOT Vercel.
+# Without this, Vercel auto-detects root-level main.py + api/ and tries to run the
+# FastAPI backend as a Python serverless function — which crashes every request with
+# ModuleNotFoundError: No module named 'fastapi'.
+#
+# NOTE: The real fix is setting the Vercel project's Root Directory to `frontend`.
+# This file is a safety net in case that setting is ever lost.
+main.py
+api/
+merger/
+eval/
+sdk/
+ageval/
+examples/
+tests/
+requirements.txt
+requirements-dev.txt
+rate_limiter.py
+*.py
