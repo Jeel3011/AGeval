@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional
 # ---------------------------------------------------------------------------
 # API client
 # ---------------------------------------------------------------------------
-_API_BASE = "https://ageval-production.up.railway.app"
+_API_BASE = "https://ageval-api.onrender.com"
 
 
 def _get_api_base() -> str:

@@ -5,7 +5,7 @@ import urllib.request
 
 def main():
     api_key = os.environ.get("AGEVAL_API_KEY")
-    api_url = os.environ.get("AGEVAL_API_URL", "https://ageval-production.up.railway.app").rstrip("/")
+    api_url = os.environ.get("AGEVAL_API_URL", "https://ageval-api.onrender.com").rstrip("/")
     agent_id = os.environ.get("AGEVAL_AGENT_ID")
     min_score = float(os.environ.get("AGEVAL_MIN_SCORE", "0.8"))
 

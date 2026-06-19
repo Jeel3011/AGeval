@@ -83,7 +83,7 @@ def run_and_report(agent_name: str, build_and_run: Callable[[], dict]) -> int:
     if ep:
         print(f"  episode_id = {ep}")
         if os.environ.get("AGEVAL_API_KEY"):
-            base = os.environ.get("AGEVAL_API_URL", "https://ageval-production.up.railway.app")
+            base = os.environ.get("AGEVAL_API_URL", "https://ageval-api.onrender.com")
             print(f"  → scores will appear at {base} (episode {ep})")
         else:
             print("  (AGEVAL_API_KEY not set — ran live but not recorded to AGeval)")

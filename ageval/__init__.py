@@ -37,7 +37,7 @@ Required env vars (user-side):
     AGEVAL_API_KEY   — your ageval API key (the only thing you need)
 
 Optional:
-    AGEVAL_API_URL   — override the API base (default: ageval-production.up.railway.app)
+    AGEVAL_API_URL   — override the API base (default: ageval-api.onrender.com)
 
 Fallback:
     If AGEVAL_API_KEY is not set, all trace functions fall back to plain

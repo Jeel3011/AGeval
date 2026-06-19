@@ -133,7 +133,7 @@ def _extract_reasoning(text: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _get_api_base() -> str:
-    return os.environ.get("AGEVAL_API_URL", "https://ageval-production.up.railway.app").rstrip("/")
+    return os.environ.get("AGEVAL_API_URL", "https://ageval-api.onrender.com").rstrip("/")
 
 
 def _get_api_key() -> str:

@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 def _get_api_base() -> str:
     return os.environ.get(
         "AGEVAL_API_URL",
-        "https://ageval-production.up.railway.app",
+        "https://ageval-api.onrender.com",
     ).rstrip("/")
 
 
